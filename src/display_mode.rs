@@ -163,20 +163,13 @@ impl Display {
         ))
     }
 
-    fn draw(&self, pt: &Option<&Track>) -> Result<(), Box<dyn std::error::Error>> {
+    fn draw(&self) -> Result<(), Box<dyn std::error::Error>> {
         unsafe { libc::tcflush(std::io::stdin().as_raw_fd(), libc::TCIFLUSH) };
         
         let mut stdout = stdout();
-        let mut to_render: bool = true;
 
-        if let Some(prev_track) = pt {
-            if prev_track.artwork == self.track.artwork {
-                to_render = false
-            }
-        }
         
 
-        if to_render {
             stdout.execute(terminal::Clear(terminal::ClearType::All))?;
             
             if let Some(v) = self.artwork_b.as_ref() {
@@ -193,7 +186,6 @@ impl Display {
 
                 viuer::print(&img, &conf)?;
             }
-        }
         
         let text_x = 45;
 
@@ -286,108 +278,55 @@ impl Display {
 }
 }
 
-async fn get_current_id() -> Result<Option<String>, String> {
-    let mut stream = match UnixStream::connect(DAEMON_SOCKET_PATH.as_path()).await {
-            Ok(s) => s,
-            Err(e) => {
-                return Err(format!("Daemon connection failed: {}. Is it running?", e));
-            }
-    };
-
-
-    let request = wincode::serialize(&Commands::GetId)
-            .map_err(|e| format!("Failed serializing internal Command: {}", e))?;
-        let len_prefix = (request.len() as u32).to_le_bytes();
-
-        if let Err(e) = stream.write_all(&len_prefix).await {
-            return Err(format!("Could not write to stream length prefix: {}", e))
-        }
-        if let Err(e) = stream.write_all(&request).await {
-
-            return Err(format!("Could not write to stream payload: {}", e))
-        }
-        let mut len_buf = [0u8; 4];
-        if let Err(e) = stream.read_exact(&mut len_buf).await {
-            return Err(format!("Error reading len buf: {}", e))
-        }
-        let len = u32::from_le_bytes(len_buf) as usize;
-
-        let mut buf = vec![0u8; len];
-        if let Err(e) = stream.read_exact(&mut buf).await {
-            return Err(format!("Error reading payload buf: {}", e))
-        }
-
-        let id: Option<String> = wincode::deserialize(&buf)
-            .map_err(|e| e.to_string())?;
-        Ok(id)
-}
-
 pub async fn run_player_loop(lyrics_enabled: bool) -> Result<(), String> {
 let mut ticker = interval(Duration::from_millis(100));
-    let mut prev_track: Option<Track> = None;
-    let mut display_queue: Vec<Option<Display>> = Vec::with_capacity(2);
-    display_queue.push(None);
-    display_queue.push(None);
+    let mut prev_id: Option<String> = None;
+    let mut display = Display::load_current().await?;
     loop {
-        let current_id = get_current_id().await?;
+            if let Some(d) = display.as_mut() {
 
-        if current_id.is_some() {
-            let id_0 = display_queue.get(0).and_then(|o| o.as_ref()).map(|d| &d.track.id);
-            let id_1 = display_queue.get(1).and_then(|o| o.as_ref()).map(|d| &d.track.id);
-
-            match (display_queue[0].is_some(), display_queue[1].is_some()) {
-                (false, false) => {
-                    display_queue[0] = Display::load_current().await?;
-                    display_queue[1] = Display::load_next().await?;
-                }
-                (true, true) => {
-                    if id_1 == Some(&current_id) {
-                        display_queue[0] = display_queue[1].take();
-                        display_queue[1] = Display::load_next().await?;
-                    } else if id_0 != Some(&current_id) {
-                        display_queue[0] = Display::load_current().await?;
-                        display_queue[1] = Display::load_next().await?;
-                    }
-                }
-                (false, true) => {
-                    display_queue[0] = Display::load_current().await?;
-                }
-                (true, false) => {
-                    display_queue[1] = Display::load_next().await?;
-                }
-            }
-        }
-
-        let track = display_queue[0].as_mut().unwrap();
-
-            if Some(&track.track) != prev_track.as_ref() {
+                if prev_id!= d.track.id {
                 //Heavy Redraw
 
-                if let Err(_) = track.draw(&prev_track.as_ref()) {
+                match Display::load_current().await?{
+                    Some(new_d) => *d=new_d,
+                    None => continue
+                }
+
+                if let Err(_) = d.draw() {
                     continue;
                 };
 
                 if lyrics_enabled {
-                    if let Err(_) = track.render_lyrics() {
+                    if let Err(_) = d.render_lyrics() {
                         continue;
                     }
                 }
-                if let Err(_) = track.update_track().await {
+                if let Err(_) = d.update_track().await {
                     continue;
                 }
 
-                prev_track = Some(track.track.clone());
+                prev_id = d.track.id.clone();
 
 
             } else {
-                if let Err(_) = track.render_light_tick() {
+                if let Err(_) = d.render_light_tick() {
                     continue;
                 }
 
-                if let Err(_) = track.update_track().await {
+                if lyrics_enabled {
+                    if let Err(_) = d.render_lyrics() {
+                        continue;
+                    }
+                }
+
+                if let Err(_) = d.update_track().await {
                     continue;
                 }
             }
+            }
+
+            
 
         ticker.tick().await;
     }
