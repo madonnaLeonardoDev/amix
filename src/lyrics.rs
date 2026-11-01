@@ -1,7 +1,7 @@
 use std::ops::Deref;
-
+use urlencoding;
 use reqwest;
-
+use tokio::time::{sleep, Duration};
 use crate::apple_music_navigation::Track;
 
 use serde::Deserialize;
@@ -38,17 +38,39 @@ fn parse_time_to_ms(time_str: &str) -> Option<u32> {
 }
 
 
-pub async fn request_lyric(track: &Track) -> Result<Vec<LyricLine>, String> {
-    let url = format!("https://lrclib.net/api/search?track_name={}&artist_name={}&album_name={}", track.title.as_deref().unwrap(), track.artist.as_deref().unwrap(), track.album.as_deref().unwrap());
-
-    let res = reqwest::get(&url).await
+pub async fn request_lyric(track: &Track) -> Result<Option<Vec<LyricLine>>, String> {
+    
+    let url = format!("https://lrclib.net/api/search?track_name={}&artist_name={}&album_name={}",
+       urlencoding::encode(track.title.as_deref().unwrap()),
+       urlencoding::encode(track.artist.as_deref().unwrap()),
+       urlencoding::encode( track.album.as_deref().unwrap()));
+    
+    let mut res = reqwest::get(&url).await
         .map_err(|e| format!("Error sending lyrcs API request: {}",e))?;
+
+    let mut retries = 3;
+    let mut retry_delay = 200;
+    while !res.status().is_success() && retries > 0 {
+        res = reqwest::get(&url).await
+        .map_err(|e| format!("Error sending lyrcs API request: {}",e))?;
+
+        sleep(Duration::from_millis(retry_delay)).await;
+
+        retries -= 1;
+        retry_delay *= 2;
+    }
+
+    if !res.status().is_success() {
+        return Ok(None)
+    }
 
     let results_vec: Vec<LrcSearchResult> = res.json().await
         .map_err(|e| e.to_string())?;
 
-    let best_match = results_vec.first()
-        .ok_or_else(|| "No matches found".to_string())?;
+    let best_match = match results_vec.first() {
+        Some(m) => m,
+        None => return Ok(None)
+    };
 
     let synced_str = best_match.synced_lyrics.deref();
 
@@ -71,7 +93,7 @@ pub async fn request_lyric(track: &Track) -> Result<Vec<LyricLine>, String> {
 
 
 
-    Ok(lyrics)
+    Ok(Some(lyrics))
 }
 
 

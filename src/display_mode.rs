@@ -69,9 +69,15 @@ let mut ticker = interval(Duration::from_millis(100));
                 //SONG CHANGED
                 if lyrics_enabled {
                     match request_lyric(&track).await {
-                        Ok(v) => lyrics = v,
-                        Err(_) => {
-                            lyrics.clear()
+                        Ok(v) => {
+                            if let Some(l) = v {
+                                lyrics = l;
+                            } else {
+                                lyrics.clear();
+                            }
+                        },
+                        Err(e) => {
+                            return Err(e);
                         }
 
                     };
@@ -100,9 +106,15 @@ let mut ticker = interval(Duration::from_millis(100));
                     //SONG CHANGED
                     if lyrics_enabled {
                     match request_lyric(&track).await {
-                        Ok(v) => lyrics = v,
-                        Err(_) => {
-                            lyrics.clear()
+                        Ok(v) => {
+                            if let Some(l) = v {
+                                lyrics = l;
+                            } else {
+                                lyrics.clear();
+                            }
+                        },
+                        Err(e) => {
+                            return Err(e);
                         }
 
                     };
