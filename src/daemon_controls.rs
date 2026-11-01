@@ -1,5 +1,5 @@
 use thirtyfour::{WebDriver};
-use crate::apple_music_navigation::*;
+use crate::{Commands, browser_interface::*};
 
 pub fn format_time(time_ms: u32) -> String {
     let tot_secs = time_ms / 1000;
@@ -16,199 +16,240 @@ pub fn format_time(time_ms: u32) -> String {
     }
 }
 
-pub async fn cmd_search(driver:&WebDriver, query: String, search_type: &ItemType, is_library: bool, queue: bool, insta_play: bool) -> Result<String, String> {
-    let search_res = search(driver, query, search_type,is_library).await?;
+impl Commands {
+    pub async fn execute_daemon(self, driver:&WebDriver) -> Result<Vec<u8>, String> {
+        match self {
+        Commands::Search { stype, query, next, insta_play, library } => {
+            let search_type = match stype.to_lowercase().as_str() {
+                "song" | "s" => ItemType::Song,
+                "album" | "a" => ItemType::Album,
+                "playlist" | "p" => ItemType::Playlist,
+                _ => {
+                   return Err("Invalid search type (stype) argument".to_string());
+                }
+            };
+            let joined_query = query.replace("-", " ");
+            let search_res = driver.search(&joined_query, &search_type,library).await?;
 
-    let result_tuple:(String, String) = match search_res {
-        SearchResult::Track(track) => {
-            let id = if track.id.is_none() {
-            return Ok("No Matches found".to_string());
-            } else {
-            track.id.clone().unwrap()
+            let result_tuple:(String, String) = match search_res {
+                SearchResult::Track(track) => {
+                    let id = if track.id.is_none() {
+                    return Ok("No Matches found".as_bytes().to_vec());
+                    } else {
+                    track.id.clone().unwrap()
+                    };
+
+                    (track.pretty_display(), id)
+            },
+            SearchResult::Playlist(playlist) => {
+                let id = if playlist.id.is_none() {
+                    return Ok("No Matches found".as_bytes().to_vec());
+                } else {
+                    playlist.id.clone().unwrap()
+                };
+
+                (playlist.pretty_display(), id)
+            },
+            SearchResult::Album(album) => {
+                let id = if album.id.is_none() {
+                    return Ok("No Matches Found".as_bytes().to_vec());
+                } else {
+                    album.id.clone().unwrap()
+                };
+
+                (album.pretty_display(), id)
+
+            }
+            };
+            if next{
+                driver.play_next(&search_type, &result_tuple.1).await?;
+            }
+            if insta_play {
+                driver.play_next(&search_type, &result_tuple.1).await?;
+                driver.next_track().await?
+            }
+            if next && insta_play {
+                return Err("Either Insta-Play (-p) or Play-Next (-n)".to_string());
+            }
+            Ok(result_tuple.0.as_bytes().to_vec())
+        },
+        Commands::Current => {
+            if let Some(track) = driver.get_current_track().await? {
+                let title:String = if track.title.is_none(){
+                    "Unkown Title".to_string()
+                } else {
+                    track.title.unwrap()
+                };
+                let artist: String = if track.artist.is_none() {
+                    "Unkown Artist".to_string()
+                } else {
+                    track.artist.unwrap()
+                };
+
+
+                let album: String = if track.album.is_none(){
+                    "Unkown Album".to_string()
+                } else {
+                    track.album.unwrap()
+                };
+
+                let duration: String = if track.duration_ms.is_none() {
+                    "Unkown Duration".to_string()
+                } else {
+                    format_time(track.duration_ms.unwrap())
+                };
+                return Ok(format!(
+                    "Track Playing:\n\r{}\n\r{} | {} ({})",
+                    title, artist, album, duration 
+                ).as_bytes().to_vec())
+            }
+
+            Ok("No Track playing".to_string().as_bytes().to_vec())
+        },
+        Commands::LsPlaylists => {
+            match driver.list_library_playlists().await {
+            Ok(pl) => {
+                let result: String = pl
+                .iter()
+                .map(|pl| pl.pretty_display())
+                .collect();
+                Ok(result.as_bytes().to_vec())
+            },
+            Err(e) => return Err(e)
+            }
+        },
+        Commands::Playid { stype, id, next } => {
+            let item_type = match stype.to_lowercase().as_str() {
+                "song" | "s" => ItemType::Song,
+                "album" | "a" => ItemType::Album,
+                "playlist" | "p" => ItemType::Playlist,
+                _ => {
+                    return Err("Invalid search type (stype) argument".to_string());
+                }
             };
 
-            (track.pretty_display(), id)
-    },
-    SearchResult::Playlist(playlist) => {
-        let id = if playlist.id.is_none() {
-            return Ok("No Matches found".to_string());
-        } else {
-            playlist.id.clone().unwrap()
-        };
+            let id = driver.play_next(&item_type, &id).await
+                .map_err(|e| e.to_string())?;
 
-        (playlist.pretty_display(), id)
-    },
-    SearchResult::Album(album) => {
-        let id = if album.id.is_none() {
-            return Ok("No Matches Found".to_string());
-        } else {
-            album.id.clone().unwrap()
-        };
+                if !next {
+                    driver.next_track().await?;
+                    return Ok(format!("Playing Now: {}",id).as_bytes().to_vec());
+                }
+            Ok(format!("Playing Next: {}",id).as_bytes().to_vec())
+        },
+        Commands::PlayPause => {
+            let script = r#"
+                const mk = MusicKit.getInstance();
+                return mk ? (mk.isPlaying || mk.playbackState === 2) : false;
+            "#;
 
-        (album.pretty_display(), id)
+            let eval_result = driver.execute(script, vec![])
+                .await
+                .map_err(|e| e.to_string())?;
 
-    }
+            // Extracts the boolean from the returned JSON payload
+            let is_playing = eval_result.json().as_bool().unwrap_or(false);
 
-    };
-    if queue{
-                play_next(driver, search_type, &result_tuple.1).await?;
+            if is_playing {
+                if let Err(e) = driver.pause().await {
+                    return Err(e.to_string());
+                };
+
+                return Ok("Pause".to_string().as_bytes().to_vec())
+            } else {
+                if let Err(e) = driver.play().await {
+                    return Err(e.to_string());
+                };
+
+                return Ok("Play".to_string().as_bytes().to_vec())
             }
-    if insta_play {
-        play_next(driver, search_type, &result_tuple.1).await?;
-        next_track(driver).await?
-    }
-    if queue && insta_play {
-        return Err("Either Insta-Play (-p) or Play-Next (-n)".to_string());
-    }
-    Ok(result_tuple.0.to_string())
-}
+        },
+        Commands::Next  => {
+            if let Err(e) = driver.next_track().await {
+                    return Err(e.to_string());
+                }
 
-pub async fn cmd_play_by_id(driver:&WebDriver, id:String, item_type: ItemType, next: bool) -> Result<String, String> {
-    let id = play_next(driver, &item_type, &id).await
-    .map_err(|e| e.to_string())?;
+            Ok("Next Track".to_string().as_bytes().to_vec())
+        },
+        Commands::Prev  => {
+            if let Err(e) = driver.previous_track().await {
+                return Err(e.to_string());
+            }
 
-    if !next {
-        next_track(driver).await?;
-        return Ok(format!("Playing Now: {}",id));
-    }
-    Ok(format!("Playing Next: {}",id))
-}
+            Ok("Previous Track".to_string().as_bytes().to_vec())
+        },
+        Commands::Shuffle => {
+            let mode = driver.shuffle_toggle().await
+                    .map_err(|e| e.to_string())?;
 
-pub async fn cmd_play_pause(driver:&WebDriver) -> Result<String, String> {
-    let script = r#"
-        const mk = MusicKit.getInstance();
-        return mk ? (mk.isPlaying || mk.playbackState === 2) : false;
-    "#;
+                if mode == 1{
+                    return Ok("Shuffling On".to_string().as_bytes().to_vec());
+                }
+            Ok("Shuffling Off".to_string().as_bytes().to_vec())
+        },
+        Commands::ClearQueue => {
+            driver.clear_queue().await?;
 
-    let eval_result = driver.execute(script, vec![])
-        .await
-        .map_err(|e| e.to_string())?;
+            Ok("Queue Cleared".to_string().as_bytes().to_vec())
+        },
+        Commands::LsQueue => {
+            let queue = driver.list_queue().await?;
 
-    // Extracts the boolean from the returned JSON payload
-    let is_playing = eval_result.json().as_bool().unwrap_or(false);
+            let formatted_str:String = queue.iter()
+            .map(|track| format!("{}",track.pretty_display()))
+            .collect();
+            
+            Ok(formatted_str.as_bytes().to_vec())
+        },
+        Commands::Volume { args } => {
+            if let Some(v) = args{
+                if v > 100 {
+                    return Err("Value must be between 0 - 100".to_string());
+                }
+            }
 
-    if is_playing {
-        if let Err(e) = pause(driver).await {
-            return Err(e.to_string());
-        };
+            let volume = driver.volume(args).await?;
 
-        return Ok("Pause".to_string())
-    } else {
-        if let Err(e) = play(driver).await {
-            return Err(e.to_string());
-        };
+            if args.is_some() {
+                Ok(format!("Volume set to: {}", volume).as_bytes().to_vec())
+            } else {
+                Ok(format!("Volume: {}", volume).as_bytes().to_vec())
+            }
+        },
+        Commands::GetPlayingTrackMeta => {
+            let current_track: Option<Track> = driver.get_current_track().await?;
 
-        return Ok("Play".to_string())
-    }
-}
+            let track_as_bytes = wincode::serialize(&current_track)
+                .map_err(|e| e.to_string())?;
 
+            Ok(track_as_bytes)
+        },
+        Commands::GetNextTrackMeta => {
+            let queue = driver.list_queue().await?;
+            let track = queue.get(1);
+            
+            let track_as_bytes = wincode::serialize(&track)
+                .map_err(|e| e.to_string())?;
 
-pub async fn cmd_next(driver:&WebDriver) -> Result<String, String> {
-    if let Err(e) = next_track(driver).await {
-        return Err(e.to_string());
-    }
+            Ok(track_as_bytes)
+        },
+        Commands::GetId => {
+            let current_track: Option<Track> = driver.get_current_track().await?;
 
-    Ok("Next Track".to_string())
-}
+            let id = if let Some(t) = current_track {
+                t.id
+            } else {
+                None
+            };
 
+            let track_as_bytes = wincode::serialize(&id)
+                .map_err(|e| e.to_string())?;
 
-pub async fn cmd_prev(driver:&WebDriver) -> Result<String, String> {
-    if let Err(e) = previous_track(driver).await {
-        return Err(e.to_string());
-    }
-
-    Ok("Previous Track".to_string())
-}
-
-pub async fn cmd_current_track(driver:&WebDriver) -> Result<String, String> {
-
-    if let Some(track) = get_current_track(driver).await? {
-        let title:String = if track.title.is_none(){
-            "Unkown Title".to_string()
-        } else {
-            track.title.unwrap()
-        };
-        let artist: String = if track.artist.is_none() {
-            "Unkown Artist".to_string()
-        } else {
-            track.artist.unwrap()
-        };
-
-
-        let album: String = if track.album.is_none(){
-            "Unkown Album".to_string()
-        } else {
-            track.album.unwrap()
-        };
-
-        let duration: String = if track.duration_ms.is_none() {
-            "Unkown Duration".to_string()
-        } else {
-            format_time(track.duration_ms.unwrap())
-        };
-        return Ok(format!(
-            "Track Playing:\n\r{}\n\r{} | {} ({})",
-            title, artist, album, duration 
-        ))
-    }
-
-    Ok("No Track playing".to_string())
-    
-}
-
-
-pub async fn cmd_list_playlists(driver:&WebDriver) -> Result<String, String> {
-    match list_library_playlists(driver).await {
-    Ok(pl) => {
-        let result: String = pl
-        .iter()
-        .map(|pl| pl.pretty_display())
-        .collect();
-        Ok(result)
-    },
-    Err(e) => return Err(e)
-    }
-}
-
-pub async fn cmd_clear_queue(driver:&WebDriver) -> Result<String, String> {
-    clear_queue(driver).await?;
-
-    Ok("Queue Cleared".to_string())
-}
-
-pub async fn cmd_toggle_shuffle(driver:&WebDriver) -> Result<String, String> {
-    let mode = shuffle_toggle(driver).await
-        .map_err(|e| e.to_string())?;
-
-    if mode == 1{
-        return Ok("Shuffling On".to_string());
-    }
-    Ok("Shuffling Off".to_string())
-}
-
-pub async fn cmd_list_queue(driver:&WebDriver) -> Result<String, String> {
-    let queue = list_queue(driver).await?;
-
-    let formatted_str:String = queue.iter()
-    .map(|track| format!("{}",track.pretty_display()))
-    .collect();
-    
-    Ok(formatted_str)
-}
-
-pub async fn cmd_volume(driver:&WebDriver, val: Option<u32>) -> Result<String, String> {
-
-    if let Some(v) = val{
-        if v > 100 {
-            return Err("Value must be between 0 - 100".to_string());
+            Ok(track_as_bytes)
+        }
+        _=> {
+            Err("Invalid Command".to_string())
+        }
         }
     }
-
-    let volume = volume(driver, &val).await?;
-
-    if val.is_some() {
-        Ok(format!("Volume set to: {}", volume))
-    } else {
-        Ok(format!("Volume: {}", volume))
-    }
-} 
+}

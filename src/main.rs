@@ -11,7 +11,7 @@ mod daemon;
 mod handle_client;
 mod paths;
 mod browser;
-mod apple_music_navigation;
+mod browser_interface;
 mod daemon_controls;
 mod display_mode;
 mod lyrics;
@@ -133,7 +133,10 @@ pub enum Commands {
     GetPlayingTrackMeta,
 
     #[command(hide = true)]
-    GetLyrics
+    GetNextTrackMeta,
+
+    #[command(hide = true)]
+    GetId
 
 }
 
@@ -143,24 +146,46 @@ fn cmd_to_daemon(cli: Cli) {
             match UnixStream::connect(DAEMON_SOCKET_PATH.as_path()) {
                 Ok(mut stream) => {
                     if let Err(e) = stream.write_all(&payload_len.to_le_bytes()) {
-                        println!("Error writing length prefix to stream: {}", e);
+                        eprintln!("Error writing length prefix to stream: {}", e);
                         return;
                     }
 
                     if let Err(e) = stream.write_all(&cmd_as_bytes) {
-                        println!("Error writing payload to stream: {}", e);
+                        eprintln!("Error writing payload to stream: {}", e);
                         return;
                     }
 
                     if let Err(e) = stream.shutdown(Shutdown::Write) {
-                        println!("Error on stream shutdown: {}", e);
+                        eprintln!("Error on stream shutdown: {}", e);
+                        return;
+                    }
+                    let mut len_b = [0u8; 4];
+                    
+                    match stream.read_exact(&mut len_b) {
+                        Ok(()) => {},
+                        Err(e) => {
+                            eprintln!("Error reading len header bytes from stream: {}", e);
+                            return;
+                        }
+                    };
+                    let len = u32::from_le_bytes(len_b) as usize;
+                    let mut response_b = vec![0u8; len];
+                    if let Err(e) = stream.read_exact(&mut response_b) {
+                        eprintln!("Error reading len header bytes from stream: {}", e);
                         return;
                     }
 
-                    let mut response = String::new();
-                    if let Ok(_) = stream.read_to_string(&mut response) {
-                        print!("{}", response);
+                    if let Err(e) = stream.read(&mut response_b) {
+                        eprintln!("Error reading bytes from stream: {}", e);
+                        return;
                     }
+                    if let Ok(s) = String::from_utf8(response_b){
+                        println!("{}", s);
+                    }else {
+                        eprintln!("Error reading len header bytes from stream");
+                        return;
+                    };
+                    
 
                 },
                 Err(_) => {

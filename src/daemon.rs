@@ -58,8 +58,6 @@ pub fn start_daemon(head: bool) -> Result<(), String> {
     let rt = tokio::runtime::Runtime::new()
         .map_err(|e| format!("Failed to boot async runtime: {}", e))?;
 
-    // Returning this block's Result directly fixes the "unused result" warning
-    // and correctly bubbles up startup/initialization errors.
     rt.block_on(async {
         // Auth check
         match apple_music_auth().await {
@@ -74,22 +72,29 @@ pub fn start_daemon(head: bool) -> Result<(), String> {
                 let listener = tokio::net::UnixListener::bind(&*DAEMON_SOCKET_PATH)
                     .map_err(|e| format!("Error in binding socket listener: {}", e))?;
                     
-                // 4. Async accept loop
                 loop {
                     match listener.accept().await {
                         Ok((mut stream, _)) => {
-                            let response = match handle_client(&mut stream, &state.driver).await {
-                                Ok(msg) => msg,
-                                Err(e) => e.to_string(),
-                            };
-                        
-                            // Write response asynchronously over the socket
-                            if let Err(e) = stream.write_all(response.as_bytes()).await {
-                                eprintln!("Error writing response: {}", e);
-                                continue;
+                            match handle_client(&mut stream, &state.driver).await {
+                                Ok(r) => {
+                                    let len_b = (r.len() as u32).to_le_bytes();
+                                    if let Err(e) = stream.write_all(&len_b).await {
+                                        eprintln!("Error writing len header: {}", e);
+                                        continue;
+                                    }
+                                    if let Err(e) = stream.write_all(&r).await {
+                                        eprintln!("Error writing response: {}", e);
+                                        continue;
+                                    }
+                                },
+                                Err(e) => {
+                                    if let Err(e) = stream.write_all(e.as_bytes()).await {
+                                            eprintln!("Error writing response: {}", e);
+                                            continue;
+                                    }
+                                },
                             }
-                        
-                            // Shutdown stream write-half asynchronously
+                            
                             if let Err(e) = stream.shutdown().await {
                                 eprintln!("Error shutting down stream: {}", e);
                                 continue;

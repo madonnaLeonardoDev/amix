@@ -1,16 +1,29 @@
 use reqwest;
 use std::os::unix::io::AsRawFd;
-use crate::lyrics::{LyricLine, request_lyric, get_current_lyrics};
+use crate::lyrics::{LyricLine, get_current_lyrics, request_lyric};
 use crate::{Commands};
-use crate::apple_music_navigation::{Track};
+use crate::browser_interface::{Track};
 use crate::paths::DAEMON_SOCKET_PATH;
 use crossterm::{cursor, ExecutableCommand, terminal};
-use std::io::{stdout, Write};
+use std::io::{Write, stdout};
 use tokio::net::UnixStream;
 use tokio::io::{AsyncWriteExt, AsyncReadExt};
 use tokio::time::{Duration, interval};
 
-async fn request_track_meta(stream: &mut UnixStream) -> Result<Option<Track>, String> {
+struct Display{
+    track: Track,
+    artwork_b: Option<Vec<u8>>,
+    lyrics: Option<Vec<LyricLine>>,
+}
+impl Display {
+    async fn update_track(&mut self) -> Result<(), String> {
+        let mut stream = match UnixStream::connect(DAEMON_SOCKET_PATH.as_path()).await {
+            Ok(s) => s,
+            Err(e) => {
+                return Err(format!("Daemon connection failed: {}. Is it running?", e));
+            }
+        };
+
         let request = wincode::serialize(&Commands::GetPlayingTrackMeta)
             .map_err(|e| format!("Failed serializing internal Command: {}", e))?;
         let len_prefix = (request.len() as u32).to_le_bytes();
@@ -22,7 +35,6 @@ async fn request_track_meta(stream: &mut UnixStream) -> Result<Option<Track>, St
 
             return Err(format!("Could not write to stream payload: {}", e))
         }
-
         let mut len_buf = [0u8; 4];
         if let Err(e) = stream.read_exact(&mut len_buf).await {
             return Err(format!("Error reading len buf: {}", e))
@@ -34,209 +46,223 @@ async fn request_track_meta(stream: &mut UnixStream) -> Result<Option<Track>, St
             return Err(format!("Error reading payload buf: {}", e))
         }
 
-        let current_track: Option<Track> = wincode::deserialize(&buf)
+        let track: Option<Track> = wincode::deserialize(&buf)
             .map_err(|e| e.to_string())?;
 
-        Ok(current_track)
-}
+        if let Some(t) = track {
+            self.track = t;
+        }
+        Ok(())
+    }
 
-
-
-
-pub async fn run_player_loop(lyrics_enabled: bool) -> Result<(), String> {
-let mut ticker = interval(Duration::from_millis(100));
-    let mut rendered_track_id: Option<String> = None;
-
-    let mut lyrics: Vec<LyricLine> = Vec::new();
-
-    loop {
+    async fn load_current() -> Result<Option<Self>, String> {
         let mut stream = match UnixStream::connect(DAEMON_SOCKET_PATH.as_path()).await {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("Daemon connection failed: {}. Is it running?", e);
-                ticker.tick().await;
-                continue;
+                return Err(format!("Daemon connection failed: {}. Is it running?", e));
             }
         };
 
-        let current_track = match request_track_meta(&mut stream).await {
-            Ok(t) => t,
-            Err(_) => continue
-        };
+        let request = wincode::serialize(&Commands::GetPlayingTrackMeta)
+            .map_err(|e| format!("Failed serializing internal Command: {}", e))?;
+        let len_prefix = (request.len() as u32).to_le_bytes();
 
-        if let Some(track) = current_track {
-            if rendered_track_id.is_none() {
-                //SONG CHANGED
-                if lyrics_enabled {
-                    match request_lyric(&track).await {
-                        Ok(v) => {
-                            if let Some(l) = v {
-                                lyrics = l;
-                            } else {
-                                lyrics.clear();
-                            }
-                        },
-                        Err(e) => {
-                            return Err(e);
-                        }
+        if let Err(e) = stream.write_all(&len_prefix).await {
+            return Err(format!("Could not write to stream length prefix: {}", e))
+        }
+        if let Err(e) = stream.write_all(&request).await {
 
-                    };
+            return Err(format!("Could not write to stream payload: {}", e))
+        }
+        let mut len_buf = [0u8; 4];
+        if let Err(e) = stream.read_exact(&mut len_buf).await {
+            return Err(format!("Error reading len buf: {}", e))
+        }
+        let len = u32::from_le_bytes(len_buf) as usize;
 
-                    let current_lyrics = get_current_lyrics(&lyrics, track.current_ms);
-
-                    render_lyrics(&current_lyrics).await
-                        .map_err(|e| e.to_string())?;
-                }
-                
-
-                render_heavy_redraw(&track).await.map_err(|e| e.to_string())?;
-            } else if let Some(id) = &track.id {
-                //SAME SONG TIME ADVANCING
-                if lyrics_enabled {
-
-                    let current_lyrics = get_current_lyrics(&lyrics, track.current_ms);
-
-                    render_lyrics(&current_lyrics).await
-                        .map_err(|e| e.to_string())?;
-                }
-
-                if Some(id.clone()) == rendered_track_id { 
-                    render_light_tick(&track).await.map_err(|e| e.to_string())?;
-                } else {
-                    //SONG CHANGED
-                    if lyrics_enabled {
-                    match request_lyric(&track).await {
-                        Ok(v) => {
-                            if let Some(l) = v {
-                                lyrics = l;
-                            } else {
-                                lyrics.clear();
-                            }
-                        },
-                        Err(e) => {
-                            return Err(e);
-                        }
-
-                    };
-
-                    let current_lyrics = get_current_lyrics(&lyrics, track.current_ms);
-
-                    render_lyrics(&current_lyrics).await
-                        .map_err(|e| e.to_string())?;
-                }
-
-                    render_heavy_redraw(&track).await.map_err(|e| e.to_string())?;
-                }
-            }
-            rendered_track_id = track.id;
+        let mut buf = vec![0u8; len];
+        if let Err(e) = stream.read_exact(&mut buf).await {
+            return Err(format!("Error reading payload buf: {}", e))
         }
 
-        ticker.tick().await;
+        let track: Option<Track> = wincode::deserialize(&buf)
+            .map_err(|e| e.to_string())?;
+
+        if let Some(track) = track  {
+        let mut artwork_b = None;
+
+        if let Some(a) = track.artwork.as_ref() {
+            match fetch_artwork(&a.url, a.width, a.height).await {
+                Ok(a) => artwork_b = Some(a),
+                Err(e) => return Err(e)
+            }
+        };
+
+        let lyrics = request_lyric(&track).await?;
+        
+
+        return Ok(Some(
+            Self { track, artwork_b, lyrics}
+            ))
+        }
+        return Ok(None);
     }
-}
 
+    async fn load_next() -> Result<Option<Self>, String> {
+        let mut stream = match UnixStream::connect(DAEMON_SOCKET_PATH.as_path()).await {
+            Ok(s) => s,
+            Err(e) => {
+                return Err(format!("Daemon connection failed: {}. Is it running?", e));
+            }
+        };
 
+        let request = wincode::serialize(&Commands::GetNextTrackMeta)
+            .map_err(|e| format!("Failed serializing internal Command: {}", e))?;
+        let len_prefix = (request.len() as u32).to_le_bytes();
 
-async fn fetch_artwork(template_url: &str, width: u32, height: u32) -> Result<Vec<u8>, String> {
-    let url = template_url
-        .replace("{w}", &width.to_string())
-        .replace("{h}",&height.to_string());
+        if let Err(e) = stream.write_all(&len_prefix).await {
+            return Err(format!("Could not write to stream length prefix: {}", e))
+        }
+        if let Err(e) = stream.write_all(&request).await {
 
-    let bytes = reqwest::get(&url)
-        .await
-        .map_err(|e| e.to_string())?
-        .bytes()
-        .await
-        .map_err(|e| e.to_string())?;
+            return Err(format!("Could not write to stream payload: {}", e))
+        }
+        let mut len_buf = [0u8; 4];
+        if let Err(e) = stream.read_exact(&mut len_buf).await {
+            return Err(format!("Error reading len buf: {}", e))
+        }
+        let len = u32::from_le_bytes(len_buf) as usize;
 
-    Ok(bytes.to_vec())
-}
+        let mut buf = vec![0u8; len];
+        if let Err(e) = stream.read_exact(&mut buf).await {
+            return Err(format!("Error reading payload buf: {}", e))
+        }
 
-async fn render_heavy_redraw(track: &Track) -> Result<(), Box<dyn std::error::Error>> {
-    unsafe {
-        libc::tcflush(std::io::stdin().as_raw_fd(), libc::TCIFLUSH);
+        let track: Option<Track> = wincode::deserialize(&buf)
+            .map_err(|e| e.to_string())?;
+
+        if track.is_none() {
+            return Ok(None);
+        }
+        let track = track.unwrap();
+
+        let mut artwork_b = None;
+
+        if let Some(a) = track.artwork.as_ref() {
+            match fetch_artwork(&a.url, a.width, a.height).await {
+                Ok(a) => artwork_b = Some(a),
+                Err(e) => return Err(e)
+            }
+        };
+
+        let lyrics = request_lyric(&track).await?;
+        
+
+        Ok(Some(
+            Self {track, artwork_b, lyrics }
+        ))
     }
-    
-    let mut stdout = stdout();
 
-    stdout.execute(terminal::Clear(terminal::ClearType::All))?;
-    stdout.execute(cursor::MoveTo(0, 0))?;
-    stdout.flush()?;
+    fn draw(&self, pt: &Option<&Track>) -> Result<(), Box<dyn std::error::Error>> {
+        unsafe { libc::tcflush(std::io::stdin().as_raw_fd(), libc::TCIFLUSH) };
+        
+        let mut stdout = stdout();
+        let mut to_render: bool = true;
 
-    if let Some(v) = track.artwork.as_ref() {
-    let art_bytes = fetch_artwork(&v.url, v.width, v.height).await?;
-    let img = image::load_from_memory(&art_bytes)?;
+        if let Some(prev_track) = pt {
+            if prev_track.artwork == self.track.artwork {
+                to_render = false
+            }
+        }
+        
 
-    let conf = viuer::Config {
-        width: Some(40),
-        height: Some(20),
-        x: 2, 
-        y: 2,
-        transparent: true,
-        ..Default::default()
+        if to_render {
+            stdout.execute(terminal::Clear(terminal::ClearType::All))?;
+            
+            if let Some(v) = self.artwork_b.as_ref() {
+                let img = image::load_from_memory(v)?;
+
+                let conf = viuer::Config {
+                    width: Some(40),
+                    height: Some(20),
+                    x: 2, 
+                    y: 2,
+                    transparent: true,
+                    ..Default::default()
+                };
+
+                viuer::print(&img, &conf)?;
+            }
+        }
+        
+        let text_x = 45;
+
+        let mut draw_text_line = |y: u16, label: &str, value: Option<&str>| -> Result<(), Box<dyn std::error::Error>> {
+            stdout.execute(cursor::MoveTo(text_x, y))?;
+            print!("{:<50}", ""); 
+            stdout.execute(cursor::MoveTo(text_x, y))?;
+            print!("{}:  {}", label, value.unwrap_or("---"));
+            Ok(())
+        };
+
+        draw_text_line(4, "TITLE", self.track.title.as_deref())?;
+        draw_text_line(6, "ARTIST", self.track.artist.as_deref())?;
+        draw_text_line(8, "ALBUM", self.track.album.as_deref())?;
+
+        self.render_light_tick()?;
+        stdout.flush()?;
+
+        Ok(())
+    }
+
+    fn render_light_tick(&self) -> Result<(), Box<dyn std::error::Error>> {
+
+        let (Some(_), Some(_)) = (self.track.duration_ms, self.track.current_ms) else {
+            return Ok(());
+        };
+
+        let duration_ms: u32 = self.track.duration_ms.unwrap();
+        let current_ms: u32 = self.track.current_ms.unwrap();
+
+        let mut stdout = stdout();
+
+
+        let dur = if duration_ms == 0 { 1 } else { duration_ms };
+        let progress = (current_ms as f64 / dur as f64).clamp(0.0, 1.0);
+
+        let bar_width = 30;
+        let filled_count = (progress * bar_width as f64).round() as usize;
+        let empty_count = bar_width - filled_count;
+
+        let filled = "█".repeat(filled_count);
+        let empty = "-".repeat(empty_count);
+
+
+        let cur_sec = current_ms / 1000;
+        let dur_sec = duration_ms / 1000;
+        
+        let cur_fmt = format!("{:02}:{:02}", cur_sec / 60, cur_sec % 60);
+        let dur_fmt = format!("{:02}:{:02}", dur_sec / 60, dur_sec % 60);
+
+
+        let text_x = 45;
+        let text_y = 11;
+
+        stdout.execute(cursor::MoveTo(text_x, text_y))?;
+        
+        print!("[{}{}]  {} / {}", filled, empty, cur_fmt, dur_fmt);
+
+        stdout.flush()?;
+        Ok(())
+    }
+
+    fn render_lyrics(&self) -> Result<(), Box<dyn std::error::Error>> {
+
+    let lyrics = match self.lyrics.as_ref() {
+        Some(l) => get_current_lyrics(&l, self.track.current_ms),
+        None => return Ok(())
     };
-
-    viuer::print(&img, &conf)?;
-    }
     
-
-    let text_x = 45;
-
-    stdout.execute(cursor::MoveTo(text_x, 4))?;
-    print!("TITLE:  {}", track.title.as_deref().unwrap_or("---"));
-
-    stdout.execute(cursor::MoveTo(text_x, 6))?;
-    print!("ARTIST: {}", track.artist.as_deref().unwrap_or("---"));
-
-    stdout.execute(cursor::MoveTo(text_x, 8))?;
-    print!("ALBUM:  {}", track.album.as_deref().unwrap_or("---"));
-    render_light_tick(track).await?;
-    stdout.flush()?;
-    Ok(())
-}
-
-async fn render_light_tick(track: &Track) -> Result<(), Box<dyn std::error::Error>> {
-    if let (None, None) = (track.current_ms, track.duration_ms){
-        return Ok(())
-    }
-
-    let duration_ms: u32 = track.duration_ms.unwrap();
-    let current_ms: u32 = track.current_ms.unwrap();
-
-    let mut stdout = stdout();
-
-
-    let dur = if duration_ms == 0 { 1 } else { duration_ms };
-    let progress = (current_ms as f64 / dur as f64).clamp(0.0, 1.0);
-
-    let bar_width = 30;
-    let filled_count = (progress * bar_width as f64).round() as usize;
-    let empty_count = bar_width - filled_count;
-
-    let filled = "█".repeat(filled_count);
-    let empty = "-".repeat(empty_count);
-
-
-    let cur_sec = current_ms / 1000;
-    let dur_sec = duration_ms / 1000;
-    
-    let cur_fmt = format!("{:02}:{:02}", cur_sec / 60, cur_sec % 60);
-    let dur_fmt = format!("{:02}:{:02}", dur_sec / 60, dur_sec % 60);
-
-
-    let text_x = 45;
-    let text_y = 11;
-
-    stdout.execute(cursor::MoveTo(text_x, text_y))?;
-    
-    print!("[{}{}]  {} / {}", filled, empty, cur_fmt, dur_fmt);
-
-    stdout.flush()?;
-    Ok(())
-}
-
-
-async fn render_lyrics(lyrics: &[&str; 3]) -> Result<(), Box<dyn std::error::Error>> {
     let mut stdout = stdout();
     let text_x = 45;
     let start_y = 14; // Positioned below the progress bar
@@ -257,4 +283,127 @@ async fn render_lyrics(lyrics: &[&str; 3]) -> Result<(), Box<dyn std::error::Err
 
     stdout.flush()?;
     Ok(())
+}
+}
+
+async fn get_current_id() -> Result<Option<String>, String> {
+    let mut stream = match UnixStream::connect(DAEMON_SOCKET_PATH.as_path()).await {
+            Ok(s) => s,
+            Err(e) => {
+                return Err(format!("Daemon connection failed: {}. Is it running?", e));
+            }
+    };
+
+
+    let request = wincode::serialize(&Commands::GetId)
+            .map_err(|e| format!("Failed serializing internal Command: {}", e))?;
+        let len_prefix = (request.len() as u32).to_le_bytes();
+
+        if let Err(e) = stream.write_all(&len_prefix).await {
+            return Err(format!("Could not write to stream length prefix: {}", e))
+        }
+        if let Err(e) = stream.write_all(&request).await {
+
+            return Err(format!("Could not write to stream payload: {}", e))
+        }
+        let mut len_buf = [0u8; 4];
+        if let Err(e) = stream.read_exact(&mut len_buf).await {
+            return Err(format!("Error reading len buf: {}", e))
+        }
+        let len = u32::from_le_bytes(len_buf) as usize;
+
+        let mut buf = vec![0u8; len];
+        if let Err(e) = stream.read_exact(&mut buf).await {
+            return Err(format!("Error reading payload buf: {}", e))
+        }
+
+        let id: Option<String> = wincode::deserialize(&buf)
+            .map_err(|e| e.to_string())?;
+        Ok(id)
+}
+
+pub async fn run_player_loop(lyrics_enabled: bool) -> Result<(), String> {
+let mut ticker = interval(Duration::from_millis(100));
+    let mut prev_track: Option<Track> = None;
+    let mut display_queue: Vec<Option<Display>> = Vec::with_capacity(2);
+    display_queue.push(None);
+    display_queue.push(None);
+    loop {
+        let current_id = get_current_id().await?;
+
+        if current_id.is_some() {
+            let id_0 = display_queue.get(0).and_then(|o| o.as_ref()).map(|d| &d.track.id);
+            let id_1 = display_queue.get(1).and_then(|o| o.as_ref()).map(|d| &d.track.id);
+
+            match (display_queue[0].is_some(), display_queue[1].is_some()) {
+                (false, false) => {
+                    display_queue[0] = Display::load_current().await?;
+                    display_queue[1] = Display::load_next().await?;
+                }
+                (true, true) => {
+                    if id_1 == Some(&current_id) {
+                        display_queue[0] = display_queue[1].take();
+                        display_queue[1] = Display::load_next().await?;
+                    } else if id_0 != Some(&current_id) {
+                        display_queue[0] = Display::load_current().await?;
+                        display_queue[1] = Display::load_next().await?;
+                    }
+                }
+                (false, true) => {
+                    display_queue[0] = Display::load_current().await?;
+                }
+                (true, false) => {
+                    display_queue[1] = Display::load_next().await?;
+                }
+            }
+        }
+
+        let track = display_queue[0].as_mut().unwrap();
+
+            if Some(&track.track) != prev_track.as_ref() {
+                //Heavy Redraw
+
+                if let Err(_) = track.draw(&prev_track.as_ref()) {
+                    continue;
+                };
+
+                if lyrics_enabled {
+                    if let Err(_) = track.render_lyrics() {
+                        continue;
+                    }
+                }
+                if let Err(_) = track.update_track().await {
+                    continue;
+                }
+
+                prev_track = Some(track.track.clone());
+
+
+            } else {
+                if let Err(_) = track.render_light_tick() {
+                    continue;
+                }
+
+                if let Err(_) = track.update_track().await {
+                    continue;
+                }
+            }
+
+        ticker.tick().await;
+    }
+}
+
+async fn fetch_artwork(template_url: &str, width: u32, height: u32) -> Result<Vec<u8>, String> {
+    let url = template_url
+        .replace("{w}", &width.to_string())
+        .replace("{h}",&height.to_string());
+
+    let bytes = reqwest::get(&url)
+        .await
+        .map_err(|e| e.to_string())?
+        .bytes()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(bytes.to_vec())
 }

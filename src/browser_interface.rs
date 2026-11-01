@@ -4,7 +4,7 @@ use thirtyfour::prelude::*;
 use serde::{Serialize, Deserialize};
 use wincode_derive::{SchemaRead, SchemaWrite};
 
-#[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite)]
+#[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite, PartialEq, Clone)]
 pub struct Artwork {
     pub height: u32,
     pub width: u32,
@@ -12,7 +12,7 @@ pub struct Artwork {
 }
 
 
-#[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite)]
+#[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite, PartialEq, Clone)]
 pub struct Track {
     pub id: Option<String>,
     pub title: Option<String>,
@@ -99,7 +99,6 @@ impl ItemType {
     }
 }
 
-// Added internal tagging to match JS output { type: "Track", ... }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum SearchResult {
@@ -108,7 +107,23 @@ pub enum SearchResult {
     Playlist(Playlist)
 }
 
-pub async fn search(driver: &WebDriver, query: String, item_type: &ItemType, is_library: bool) -> Result<SearchResult, String> {
+pub trait MusicDriver {
+    async fn search(&self, query: &str, item_type: &ItemType, is_library: bool) -> Result<SearchResult, String>;
+    async fn play_next(&self, item_type: &ItemType, id: &str) -> Result<String, String>;
+    async fn play(&self) -> Result<(), String>;
+    async fn pause(&self) -> Result<(), String>;
+    async fn next_track(&self) -> Result<(), String>;
+    async fn previous_track(&self) -> Result<(), String>;
+    async fn shuffle_toggle(&self) -> Result<i64, String>;
+    async fn list_library_playlists(&self) -> Result<Vec<Playlist>, String>;
+    async fn get_current_track(&self) -> Result<Option<Track>, String>;
+    async fn clear_queue(&self) -> Result<(), String>;
+    async fn list_queue(&self) -> Result<Vec<Track>, String>;
+    async fn volume(&self, val: Option<u32>) -> Result<i32, String>;
+}
+
+impl MusicDriver for WebDriver {
+    async fn search(&self, query: &str, item_type: &ItemType, is_library: bool) -> Result<SearchResult, String> {
     let script: String = if is_library {
         format!(
             r#"
@@ -236,16 +251,15 @@ pub async fn search(driver: &WebDriver, query: String, item_type: &ItemType, is_
         )
     };
 
-    let res = driver.execute(script, vec![]).await
+    let res = self.execute(script, vec![]).await
         .map_err(|e| e.to_string())?;
 
     let search_result: Option<SearchResult> = serde_json::from_value(res.json().clone())
         .map_err(|e| format!("Deserialization error: {}", e))?;
 
     search_result.ok_or_else(|| "No Matches Found".to_string())
-}
-
-pub async fn play_next(driver: &WebDriver, item_type: &ItemType, id: &str) -> Result<String, String> {
+    }
+    async fn play_next(&self, item_type: &ItemType, id: &str) -> Result<String, String> {
     let script = format!(r#"
     return (async () => {{
         const mk = MusicKit.getInstance();
@@ -259,50 +273,49 @@ pub async fn play_next(driver: &WebDriver, item_type: &ItemType, id: &str) -> Re
     catch (e) {{
         return false;
     }}
-}})()
-"#, item_type.as_str(), id);
+    }})()
+    "#, item_type.as_str(), id);
 
-let res = driver.execute(script, vec![]).await
-    .map_err(|e| e.to_string())?;
+    let res = self.execute(script, vec![]).await
+        .map_err(|e| e.to_string())?;
 
 
-let is_success: bool = serde_json::from_value(res.json().clone())
-    .map_err(|e| e.to_string())?;
+    let is_success: bool = serde_json::from_value(res.json().clone())
+        .map_err(|e| e.to_string())?;
 
-if is_success {
-    return Ok(id.to_string())
-}
+    if is_success {
+        return Ok(id.to_string())
+    }
 
-Err("Could Not play next, maybe wrong id".to_string())
-    
-}
-pub async fn play(driver: &WebDriver) -> Result<(), String> {
+    Err("Could Not play next, maybe wrong id".to_string())
+        
+    }
+    async fn play(&self) -> Result<(), String> {
     let script = "MusicKit.getInstance().play();";
-    driver.execute(script, vec![]).await.map_err(|e| e.to_string())?;
+    self.execute(script, vec![]).await.map_err(|e| e.to_string())?;
     Ok(())
-}
-pub async fn pause(driver: &WebDriver) -> Result<(), String> {
+    }   
+    async fn pause(&self) -> Result<(), String> {
     let script = "MusicKit.getInstance().pause();";
-    driver.execute(script, vec![]).await.map_err(|e| e.to_string())?;
+    self.execute(script, vec![]).await.map_err(|e| e.to_string())?;
     Ok(())
 }
-pub async fn next_track(driver: &WebDriver) -> Result<(), String> {
+    async fn next_track(&self) -> Result<(), String> {
     let script = "MusicKit.getInstance().skipToNextItem();";
-    driver.execute(script, vec![]).await.map_err(|e| e.to_string())?;
+    self.execute(script, vec![]).await.map_err(|e| e.to_string())?;
     Ok(())
 }
-pub async fn previous_track(driver: &WebDriver) -> Result<(), String> {
+    async fn previous_track(&self) -> Result<(), String> {
     let script = "MusicKit.getInstance().skipToPreviousItem();";
-    driver.execute(script, vec![]).await.map_err(|e| e.to_string())?;
+    self.execute(script, vec![]).await.map_err(|e| e.to_string())?;
     Ok(())
 }
-
-pub async fn shuffle_toggle(driver: &WebDriver) -> Result<i64, String> {
+    async fn shuffle_toggle(&self) -> Result<i64, String> {
     let script = r#"
         return window.MusicKit.getInstance().shuffleMode;
     "#;
 
-    let value = driver.execute(script, vec![]).await
+    let value = self.execute(script, vec![]).await
         .map_err(|e| format!("Failed to execute script: {}", e))?;
 
     // Convert the serde_json::Value to a Rust boolean
@@ -315,11 +328,10 @@ pub async fn shuffle_toggle(driver: &WebDriver) -> Result<i64, String> {
     };
 
     let script = format!{"MusicKit.getInstance().shuffleMode = {};", num_mode};
-    driver.execute(script, vec![]).await.map_err(|e| e.to_string())?;
+    self.execute(script, vec![]).await.map_err(|e| e.to_string())?;
     Ok(num_mode)
 }
-
-pub async fn list_library_playlists(driver: &WebDriver) -> Result<Vec<Playlist>, String> {
+    async fn list_library_playlists(&self) -> Result<Vec<Playlist>, String> {
     let script = r#"
         return (async () => {
             try {
@@ -344,7 +356,7 @@ pub async fn list_library_playlists(driver: &WebDriver) -> Result<Vec<Playlist>,
         })();
     "#;
 
-    let res = driver
+    let res = self
         .execute(script, vec![])
         .await
         .map_err(|e| format!("WebDriver script execution failed: {}", e))?;
@@ -359,8 +371,7 @@ pub async fn list_library_playlists(driver: &WebDriver) -> Result<Vec<Playlist>,
         )
     })
 }
-
-pub async fn get_current_track(driver: &WebDriver) -> Result<Option<Track>, String> {
+    async fn get_current_track(&self) -> Result<Option<Track>, String> {
     let script = r#"
 return (() => {
     let mediaItem = MusicKit.getInstance().nowPlayingItem;
@@ -381,7 +392,7 @@ return (() => {
 })();
     "#;
 
-    let res = driver.execute(script, vec![])
+    let res = self.execute(script, vec![])
         .await
         .map_err(|e| e.to_string())?;
 
@@ -393,44 +404,40 @@ return (() => {
     }
     Ok(track_obj)
 }
-
-
-pub async fn clear_queue(driver: &WebDriver) -> Result<(), String> {
+    async fn clear_queue(&self) -> Result<(), String> {
     let script = r#"
     MusicKit.getInstance().clearQueue()
     "#;
 
-    driver.execute(script, vec![]).await.map_err(|e| e.to_string())?;
+    self.execute(script, vec![]).await.map_err(|e| e.to_string())?;
     
     Ok(())
 }
+    async fn list_queue(&self) -> Result<Vec<Track>, String> {
+    let script = r#"
+        return (async () => {
+        let res = MusicKit.getInstance().queue._queueItems || [];
+        return res.map(e => ({
+            id: e.item.id,
+            title: e.item.attributes.name,
+            artist: e.item.attributes.artistName,
+            album: e.item.attributes.albumName,
+            duration_ms: e.item.attributes.durationInMillis
+        }));
+    })();
+    "#;
 
-pub async fn list_queue(driver: &WebDriver) -> Result<Vec<Track>, String> {
- let script = r#"
-    return (async () => {
-    let res = MusicKit.getInstance().queue._queueItems || [];
-    return res.map(e => ({
-        id: e.item.id,
-        title: e.item.attributes.name,
-        artist: e.item.attributes.artistName,
-        album: e.item.attributes.albumName,
-        duration_ms: e.item.attributes.durationInMillis
-    }));
-})();
- "#;
+    let res = self.execute(script, vec![]).await
+        .map_err(|e| e.to_string())?;
 
-let res = driver.execute(script, vec![]).await
-    .map_err(|e| e.to_string())?;
-
-let parsed_res: Vec<Track> = serde_json::from_value(res.json().clone())
-    .map_err(|e| e.to_string())?;
-
+    let parsed_res: Vec<Track> = serde_json::from_value(res.json().clone())
+        .map_err(|e| e.to_string())?;
 
 
- Ok(parsed_res)
-} 
 
-pub async fn volume(driver: &WebDriver, val: &Option<u32>) -> Result<i32, String> {
+    Ok(parsed_res)
+    } 
+    async fn volume(&self, val: Option<u32>) -> Result<i32, String> {
     let script =
         if val.is_none() {
                 r#"
@@ -449,10 +456,12 @@ pub async fn volume(driver: &WebDriver, val: &Option<u32>) -> Result<i32, String
             )
         };
 
-        let res = driver.execute(script, vec![]).await
+        let res = self.execute(script, vec![]).await
             .map_err(|e| e.to_string())?;
 
         let parsed_res: f64 = serde_json::from_value(res.json().clone())
             .map_err(|e| e.to_string())?;
     Ok((parsed_res * 100.0).round() as i32)
 }
+}
+

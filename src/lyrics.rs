@@ -2,7 +2,7 @@ use std::ops::Deref;
 use urlencoding;
 use reqwest;
 use tokio::time::{sleep, Duration};
-use crate::apple_music_navigation::Track;
+use crate::browser_interface::Track;
 
 use serde::Deserialize;
 
@@ -18,7 +18,6 @@ pub struct LyricLine{
     pub timestamp: u32,
     pub text: String
 }
-
 fn parse_time_to_ms(time_str: &str) -> Option<u32> {
     let mut split = time_str.split(':');
     let mins: u32 = split.next()?.parse().ok()?;
