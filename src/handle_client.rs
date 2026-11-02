@@ -26,5 +26,8 @@ pub async fn handle_client(stream: &mut UnixStream, driver: &WebDriver) -> Resul
     let command: Commands = wincode::deserialize(&payload)
         .map_err(|e| format!("Failed Deserializing payload from bytes: {}", e))?;
     
-    Ok(command.execute_daemon(driver).await?)
+    let bytes= wincode::serialize(&command.execute_daemon(driver).await?)
+        .map_err(|e| format!("Failed Serializing Daemon response: {}",e))?;
+
+    Ok(bytes)
 } 

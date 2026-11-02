@@ -1,7 +1,8 @@
+
 use reqwest;
 use std::os::unix::io::AsRawFd;
+use crate::Commands;
 use crate::lyrics::{LyricLine, get_current_lyrics, request_lyric};
-use crate::{Commands};
 use crate::browser_interface::{Track};
 use crate::paths::DAEMON_SOCKET_PATH;
 use crossterm::{cursor, ExecutableCommand, terminal};
@@ -9,22 +10,16 @@ use std::io::{Write, stdout};
 use tokio::net::UnixStream;
 use tokio::io::{AsyncWriteExt, AsyncReadExt};
 use tokio::time::{Duration, interval};
-
+use crate::daemon_persistent::DaemonCommands;
+use crate::daemon::DaemonResponse;
 struct Display{
     track: Track,
     artwork_b: Option<Vec<u8>>,
     lyrics: Option<Vec<LyricLine>>,
 }
 impl Display {
-    async fn update_track(&mut self) -> Result<(), String> {
-        let mut stream = match UnixStream::connect(DAEMON_SOCKET_PATH.as_path()).await {
-            Ok(s) => s,
-            Err(e) => {
-                return Err(format!("Daemon connection failed: {}. Is it running?", e));
-            }
-        };
-
-        let request = wincode::serialize(&Commands::GetPlayingTrackMeta)
+    async fn update_track(&mut self, stream:&mut UnixStream) -> Result<(), String> {
+        let request = wincode::serialize(&DaemonCommands::GetCurrentTrackMeta)
             .map_err(|e| format!("Failed serializing internal Command: {}", e))?;
         let len_prefix = (request.len() as u32).to_le_bytes();
 
@@ -46,7 +41,12 @@ impl Display {
             return Err(format!("Error reading payload buf: {}", e))
         }
 
-        let track: Option<Track> = wincode::deserialize(&buf)
+        let d_res: Vec<u8> = match DaemonResponse::get_res(buf)?{
+            DaemonResponse::Error(e) => return Err(e.to_string()),
+            DaemonResponse::Success(s) => s
+        };
+
+        let track: Option<Track> = wincode::deserialize(&d_res)
             .map_err(|e| e.to_string())?;
 
         if let Some(t) = track {
@@ -55,15 +55,8 @@ impl Display {
         Ok(())
     }
 
-    async fn load_current() -> Result<Option<Self>, String> {
-        let mut stream = match UnixStream::connect(DAEMON_SOCKET_PATH.as_path()).await {
-            Ok(s) => s,
-            Err(e) => {
-                return Err(format!("Daemon connection failed: {}. Is it running?", e));
-            }
-        };
-
-        let request = wincode::serialize(&Commands::GetPlayingTrackMeta)
+    async fn load_current(stream: &mut UnixStream) -> Result<Option<Self>, String> {
+        let request = wincode::serialize(&DaemonCommands::GetCurrentTrackMeta)
             .map_err(|e| format!("Failed serializing internal Command: {}", e))?;
         let len_prefix = (request.len() as u32).to_le_bytes();
 
@@ -85,8 +78,13 @@ impl Display {
             return Err(format!("Error reading payload buf: {}", e))
         }
 
-        let track: Option<Track> = wincode::deserialize(&buf)
-            .map_err(|e| e.to_string())?;
+        let d_res: Vec<u8> = match DaemonResponse::get_res(buf)?{
+            DaemonResponse::Error(e) => return Err(e.to_string()),
+            DaemonResponse::Success(s) => s
+        };
+
+        let track: Option<Track> = wincode::deserialize(&d_res)
+            .map_err(|e| format!("Failed Deserializng Track: {}", e))?;
 
         if let Some(track) = track  {
         let mut artwork_b = None;
@@ -108,15 +106,8 @@ impl Display {
         return Ok(None);
     }
 
-    async fn load_next() -> Result<Option<Self>, String> {
-        let mut stream = match UnixStream::connect(DAEMON_SOCKET_PATH.as_path()).await {
-            Ok(s) => s,
-            Err(e) => {
-                return Err(format!("Daemon connection failed: {}. Is it running?", e));
-            }
-        };
-
-        let request = wincode::serialize(&Commands::GetNextTrackMeta)
+    async fn load_next(stream: &mut UnixStream) -> Result<Option<Self>, String> {
+        let request = wincode::serialize(&DaemonCommands::GetNextTrackMeta)
             .map_err(|e| format!("Failed serializing internal Command: {}", e))?;
         let len_prefix = (request.len() as u32).to_le_bytes();
 
@@ -137,8 +128,12 @@ impl Display {
         if let Err(e) = stream.read_exact(&mut buf).await {
             return Err(format!("Error reading payload buf: {}", e))
         }
+        let d_res: Vec<u8> = match DaemonResponse::get_res(buf)?{
+            DaemonResponse::Error(e) => return Err(e.to_string()),
+            DaemonResponse::Success(s) => s
+        };
 
-        let track: Option<Track> = wincode::deserialize(&buf)
+        let track: Option<Track> = wincode::deserialize(&d_res)
             .map_err(|e| e.to_string())?;
 
         if track.is_none() {
@@ -279,16 +274,53 @@ impl Display {
 }
 
 pub async fn run_player_loop(lyrics_enabled: bool) -> Result<(), String> {
-let mut ticker = interval(Duration::from_millis(100));
+    let mut stream = match UnixStream::connect(DAEMON_SOCKET_PATH.as_path()).await {
+        Ok(s) => s,
+        Err(e) => {
+            return Err(format!("Daemon connection failed: {}. Is it running?", e));
+        }
+    };
+    //Start Persistent Connection
+    let request = wincode::serialize(&Commands::DisplaModeDaemon)
+            .map_err(|e| format!("Failed serializing internal Command: {}", e))?;
+        let len_prefix = (request.len() as u32).to_le_bytes();
+
+        if let Err(e) = stream.write_all(&len_prefix).await {
+            return Err(format!("Could not write to stream length prefix: {}", e))
+        }
+        if let Err(e) = stream.write_all(&request).await {
+
+            return Err(format!("Could not write to stream payload: {}", e))
+        }
+    //Read empty vec returned by data to sync
+
+    let mut len_buf = [0u8; 4];
+        if let Err(e) = stream.read_exact(&mut len_buf).await {
+            return Err(format!("Error reading len buf: {}", e))
+        }
+        let len = u32::from_le_bytes(len_buf) as usize;
+
+        let mut buf = vec![0u8; len];
+        if let Err(e) = stream.read_exact(&mut buf).await {
+            return Err(format!("Error reading payload buf: {}", e))
+        }
+
+        match DaemonResponse::get_res(buf)? {
+            DaemonResponse::Error(e) => return Err(e),
+            DaemonResponse::Success(_) => {}
+        };
+
+
+    let mut ticker = interval(Duration::from_millis(100));
     let mut prev_id: Option<String> = None;
-    let mut display = Display::load_current().await?;
+    let mut display = Display::load_current(&mut stream).await?;
     loop {
             if let Some(d) = display.as_mut() {
 
                 if prev_id!= d.track.id {
                 //Heavy Redraw
 
-                match Display::load_current().await?{
+                match Display::load_current(&mut stream).await?{
                     Some(new_d) => *d=new_d,
                     None => continue
                 }
@@ -302,16 +334,13 @@ let mut ticker = interval(Duration::from_millis(100));
                         continue;
                     }
                 }
-                if let Err(_) = d.update_track().await {
-                    continue;
-                }
 
                 prev_id = d.track.id.clone();
 
 
             } else {
-                if let Err(_) = d.render_light_tick() {
-                    continue;
+                if let Err(e) = d.render_light_tick() {
+                    break Err(format!("Stream desync detected: {}. Reconnecting...", e));
                 }
 
                 if lyrics_enabled {
@@ -320,7 +349,7 @@ let mut ticker = interval(Duration::from_millis(100));
                     }
                 }
 
-                if let Err(_) = d.update_track().await {
+                if let Err(_) = d.update_track(&mut stream).await {
                     continue;
                 }
             }

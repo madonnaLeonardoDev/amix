@@ -4,7 +4,7 @@ use std::net::Shutdown;
 use clap::{Parser, Subcommand};
 use wincode_derive::{SchemaRead, SchemaWrite};
 use crate::paths::{DAEMON_SOCKET_PATH};
-use crate::daemon::{kill_all, start_daemon};
+use crate::daemon::{DaemonResponse, kill_all, start_daemon};
 use crate::display_mode::run_player_loop;
 use wincode;
 mod daemon;
@@ -15,6 +15,7 @@ mod browser_interface;
 mod daemon_controls;
 mod display_mode;
 mod lyrics;
+mod daemon_persistent;
 
 #[derive(Parser, SchemaWrite, SchemaRead)]
 struct Cli {
@@ -130,13 +131,7 @@ pub enum Commands {
 
     //INTERNAL COMMANDS
     #[command(hide = true)]
-    GetPlayingTrackMeta,
-
-    #[command(hide = true)]
-    GetNextTrackMeta,
-
-    #[command(hide = true)]
-    GetId
+    DisplaModeDaemon
 
 }
 
@@ -169,17 +164,28 @@ fn cmd_to_daemon(cli: Cli) {
                         }
                     };
                     let len = u32::from_le_bytes(len_b) as usize;
-                    let mut response_b = vec![0u8; len];
-                    if let Err(e) = stream.read_exact(&mut response_b) {
+                    let mut buf = vec![0u8; len];
+                    if let Err(e) = stream.read_exact(&mut buf) {
                         eprintln!("Error reading len header bytes from stream: {}", e);
                         return;
                     }
+                    let res = match DaemonResponse::get_res(buf){
+                        Ok(r)=> r,
+                        Err(e) => {
+                            eprintln!("Error from daemon: {}", e);
+                            return;
+                        }
+                    };
+                    let res_b = match res {
+                        DaemonResponse::Error(e) => {
+                            eprintln!("{}", e);
+                            return;
+                        },
+                        DaemonResponse::Success(s) => s
+                    };
 
-                    if let Err(e) = stream.read(&mut response_b) {
-                        eprintln!("Error reading bytes from stream: {}", e);
-                        return;
-                    }
-                    if let Ok(s) = String::from_utf8(response_b){
+
+                    if let Ok(s) = String::from_utf8(res_b){
                         println!("{}", s);
                     }else {
                         eprintln!("Error reading len header bytes from stream");
@@ -218,7 +224,7 @@ fn main() {
                 Err(e) => eprintln!("Failed to create Tokio runtime: {}", e),
             }
         },
-        Commands::GetPlayingTrackMeta => {
+        Commands::DisplaModeDaemon => {
             println!("This is an internal daemon command and is not meant to be executed directly");
         }
         _=>{

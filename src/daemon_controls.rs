@@ -17,7 +17,7 @@ pub fn format_time(time_ms: u32) -> String {
 }
 
 impl Commands {
-    pub async fn execute_daemon(self, driver:&WebDriver) -> Result<Vec<u8>, String> {
+    pub async fn execute_daemon(self, driver:&WebDriver) -> Result<(Vec<u8>, bool /* requires persistent connection */), String> {
         match self {
         Commands::Search { stype, query, next, insta_play, library } => {
             let search_type = match stype.to_lowercase().as_str() {
@@ -34,7 +34,7 @@ impl Commands {
             let result_tuple:(String, String) = match search_res {
                 SearchResult::Track(track) => {
                     let id = if track.id.is_none() {
-                    return Ok("No Matches found".as_bytes().to_vec());
+                    return Ok(("No Matches found".as_bytes().to_vec(), false));
                     } else {
                     track.id.clone().unwrap()
                     };
@@ -43,7 +43,7 @@ impl Commands {
             },
             SearchResult::Playlist(playlist) => {
                 let id = if playlist.id.is_none() {
-                    return Ok("No Matches found".as_bytes().to_vec());
+                    return Ok(("No Matches found".as_bytes().to_vec(), false));
                 } else {
                     playlist.id.clone().unwrap()
                 };
@@ -52,7 +52,7 @@ impl Commands {
             },
             SearchResult::Album(album) => {
                 let id = if album.id.is_none() {
-                    return Ok("No Matches Found".as_bytes().to_vec());
+                    return Ok(("No Matches Found".as_bytes().to_vec(), false));
                 } else {
                     album.id.clone().unwrap()
                 };
@@ -71,7 +71,7 @@ impl Commands {
             if next && insta_play {
                 return Err("Either Insta-Play (-p) or Play-Next (-n)".to_string());
             }
-            Ok(result_tuple.0.as_bytes().to_vec())
+            Ok((result_tuple.0.as_bytes().to_vec(), false))
         },
         Commands::Current => {
             if let Some(track) = driver.get_current_track().await? {
@@ -98,13 +98,13 @@ impl Commands {
                 } else {
                     format_time(track.duration_ms.unwrap())
                 };
-                return Ok(format!(
+                return Ok((format!(
                     "Track Playing:\n\r{}\n\r{} | {} ({})",
                     title, artist, album, duration 
-                ).as_bytes().to_vec())
+                ).as_bytes().to_vec(), false))
             }
 
-            Ok("No Track playing".to_string().as_bytes().to_vec())
+            Ok(("No Track playing".to_string().as_bytes().to_vec(), false))
         },
         Commands::LsPlaylists => {
             match driver.list_library_playlists().await {
@@ -113,7 +113,7 @@ impl Commands {
                 .iter()
                 .map(|pl| pl.pretty_display())
                 .collect();
-                Ok(result.as_bytes().to_vec())
+                Ok((result.as_bytes().to_vec(), false))
             },
             Err(e) => return Err(e)
             }
@@ -133,9 +133,9 @@ impl Commands {
 
                 if !next {
                     driver.next_track().await?;
-                    return Ok(format!("Playing Now: {}",id).as_bytes().to_vec());
+                    return Ok((format!("Playing Now: {}",id).as_bytes().to_vec(), false));
                 }
-            Ok(format!("Playing Next: {}",id).as_bytes().to_vec())
+            Ok((format!("Playing Next: {}",id).as_bytes().to_vec(), false))
         },
         Commands::PlayPause => {
             let script = r#"
@@ -155,13 +155,13 @@ impl Commands {
                     return Err(e.to_string());
                 };
 
-                return Ok("Pause".to_string().as_bytes().to_vec())
+                return Ok(("Pause".to_string().as_bytes().to_vec(), false))
             } else {
                 if let Err(e) = driver.play().await {
                     return Err(e.to_string());
                 };
 
-                return Ok("Play".to_string().as_bytes().to_vec())
+                return Ok(("Play".to_string().as_bytes().to_vec(), false))
             }
         },
         Commands::Next  => {
@@ -169,28 +169,28 @@ impl Commands {
                     return Err(e.to_string());
                 }
 
-            Ok("Next Track".to_string().as_bytes().to_vec())
+            Ok(("Next Track".to_string().as_bytes().to_vec(), false))
         },
         Commands::Prev  => {
             if let Err(e) = driver.previous_track().await {
                 return Err(e.to_string());
             }
 
-            Ok("Previous Track".to_string().as_bytes().to_vec())
+            Ok(("Previous Track".to_string().as_bytes().to_vec(), false))
         },
         Commands::Shuffle => {
             let mode = driver.shuffle_toggle().await
                     .map_err(|e| e.to_string())?;
 
                 if mode == 1{
-                    return Ok("Shuffling On".to_string().as_bytes().to_vec());
+                    return Ok(("Shuffling On".to_string().as_bytes().to_vec(), false));
                 }
-            Ok("Shuffling Off".to_string().as_bytes().to_vec())
+            Ok(("Shuffling Off".to_string().as_bytes().to_vec(), false))
         },
         Commands::ClearQueue => {
             driver.clear_queue().await?;
 
-            Ok("Queue Cleared".to_string().as_bytes().to_vec())
+            Ok(("Queue Cleared".to_string().as_bytes().to_vec(), false))
         },
         Commands::LsQueue => {
             let queue = driver.list_queue().await?;
@@ -199,7 +199,7 @@ impl Commands {
             .map(|track| format!("{}",track.pretty_display()))
             .collect();
             
-            Ok(formatted_str.as_bytes().to_vec())
+            Ok((formatted_str.as_bytes().to_vec(), false))
         },
         Commands::Volume { args } => {
             if let Some(v) = args{
@@ -211,42 +211,14 @@ impl Commands {
             let volume = driver.volume(args).await?;
 
             if args.is_some() {
-                Ok(format!("Volume set to: {}", volume).as_bytes().to_vec())
+                Ok((format!("Volume set to: {}", volume).as_bytes().to_vec(), false))
             } else {
-                Ok(format!("Volume: {}", volume).as_bytes().to_vec())
+                Ok((format!("Volume: {}", volume).as_bytes().to_vec(), false))
             }
         },
-        Commands::GetPlayingTrackMeta => {
-            let current_track: Option<Track> = driver.get_current_track().await?;
-
-            let track_as_bytes = wincode::serialize(&current_track)
-                .map_err(|e| e.to_string())?;
-
-            Ok(track_as_bytes)
+        Commands::DisplaModeDaemon => {
+            Ok((vec![0u8; 1], true))
         },
-        Commands::GetNextTrackMeta => {
-            let queue = driver.list_queue().await?;
-            let track = queue.get(1);
-            
-            let track_as_bytes = wincode::serialize(&track)
-                .map_err(|e| e.to_string())?;
-
-            Ok(track_as_bytes)
-        },
-        Commands::GetId => {
-            let current_track: Option<Track> = driver.get_current_track().await?;
-
-            let id = if let Some(t) = current_track {
-                t.id
-            } else {
-                None
-            };
-
-            let track_as_bytes = wincode::serialize(&id)
-                .map_err(|e| e.to_string())?;
-
-            Ok(track_as_bytes)
-        }
         _=> {
             Err("Invalid Command".to_string())
         }
