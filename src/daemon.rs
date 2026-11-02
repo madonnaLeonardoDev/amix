@@ -102,95 +102,92 @@ pub fn start_daemon(head: bool) -> Result<(), String> {
                 // Bind Tokio async Unix socket listener
                 let listener = tokio::net::UnixListener::bind(&*DAEMON_SOCKET_PATH)
                     .map_err(|e| format!("Error in binding socket listener: {}", e))?;
-                    
+
+                let state = std::sync::Arc::new(state);
                 loop {
-                    match listener.accept().await {
-                        Ok((mut stream, _)) => {
-                            match handle_client(&mut stream, &state.driver).await {
-                                Ok(r) => {
-                                    let payload: (Vec<u8>, bool) = match wincode::deserialize(&r) {
-                                        Ok(p) => p,
-                                        Err(e) => {
-                                            eprintln!("Error deserializing payload flags: {}", e);
-                                            continue;
-                                        }
-                                    };
-                                    let initial_res = match DaemonResponse::bytes_succ(r) {
-                                        Ok(bytes) => bytes,
-                                        Err(e) => {
-                                            eprintln!("{}", e);
-                                            continue;
-                                        }
-                                    };
+        match listener.accept().await {
+            Ok((mut stream, _)) => {
+            
+            let state = state.clone();
 
-                                    let len_b = (initial_res.len() as u32).to_le_bytes();
-                                    if stream.write_all(&len_b).await.is_err() || stream.write_all(&initial_res).await.is_err() {
-                                        eprintln!("Failed to write initial response to client");
-                                        continue;
-                                    }
+            
+            tokio::spawn(async move {
+                match handle_client(&mut stream, &state.driver).await {
+                    Ok(r) => {
+                        let payload: (Vec<u8>, bool) = match wincode::deserialize(&r) {
+                            Ok(p) => p,
+                            Err(e) => {
+                                eprintln!("Error deserializing payload flags: {}", e);
+                                return;
+                            }
+                        };
+                        let initial_res = match DaemonResponse::bytes_succ(r) {
+                            Ok(bytes) => bytes,
+                            Err(e) => {
+                                eprintln!("{}", e);
+                                return;
+                            }
+                        };
 
-                                    // 2. If it requires a persistent connection, loop on the existing stream safely
-                                    if payload.1 {
-                                        loop {
-                                            match handle_persistent_connection(&mut stream, &state.driver).await {
-                                                Ok(r) => {
-                                                    let res = match DaemonResponse::bytes_succ(r) {
-                                                        Ok(bytes) => bytes,
-                                                        Err(e) => {
-                                                            eprintln!("{}", e);
-                                                            break; // Drop client connection on serialization failure, keeping daemon alive
-                                                        }
-                                                    };
+                        let len_b = (initial_res.len() as u32).to_le_bytes();
+                        if stream.write_all(&len_b).await.is_err() || stream.write_all(&initial_res).await.is_err() {
+                            eprintln!("Failed to write initial response to client");
+                            return;
+                        }
 
-                                                    let len_b = (res.len() as u32).to_le_bytes();
-                                                    if stream.write_all(&len_b).await.is_err() || stream.write_all(&res).await.is_err() {
-                                                        break; // Client disconnected
-                                                    }
-                                                },
-                                                Err(e) => {
-                                                    let res = match DaemonResponse::bytes_err(e) {
-                                                        Ok(bytes) => bytes,
-                                                        Err(err) => {
-                                                            eprintln!("{}", err);
-                                                            break;
-                                                        }
-                                                    };
-
-                                                    let len_b = (res.len() as u32).to_le_bytes();
-                                                    if stream.write_all(&len_b).await.is_err() || stream.write_all(&res).await.is_err() {
-                                                        break; // Client disconnected
-                                                    }
-                                                }
+                        if payload.1 {
+                            loop {
+                                match handle_persistent_connection(&mut stream, &state.driver).await {
+                                    Ok(r) => {
+                                        let res = match DaemonResponse::bytes_succ(r) {
+                                            Ok(bytes) => bytes,
+                                            Err(e) => {
+                                                eprintln!("{}", e);
+                                                break; // Drop client connection on error, break inner loop
                                             }
+                                        };
+
+                                        let len_b = (res.len() as u32).to_le_bytes();
+                                        if stream.write_all(&len_b).await.is_err() || stream.write_all(&res).await.is_err() {
+                                            break; // Client disconnected
+                                        }
+                                    },
+                                    Err(e) => {
+                                        let res = match DaemonResponse::bytes_err(e) {
+                                            Ok(bytes) => bytes,
+                                            Err(err) => {
+                                                eprintln!("{}", err);
+                                                break;
+                                            }
+                                        };
+
+                                        let len_b = (res.len() as u32).to_le_bytes();
+                                        if stream.write_all(&len_b).await.is_err() || stream.write_all(&res).await.is_err() {
+                                            break; // Client disconnected
                                         }
                                     }
-                                },
-                                Err(e) => {
-                                    let e_bytes = DaemonResponse::bytes_err(e)?;
-
-                                    if let Err(e) = stream.write_all(&(e_bytes.len() as u32).to_le_bytes()).await {
-                                        eprintln!("Error writing response: {}", e);
-                                        continue;
-                                    }
-
-
-                                    if let Err(e) = stream.write_all(&e_bytes).await {
-                                            eprintln!("Error writing response: {}", e);
-                                            continue;
-                                    }
-                                },
-                            }
-                            
-                            if let Err(e) = stream.shutdown().await {
-                                eprintln!("Error shutting down stream: {}", e);
-                                continue;
+                                }
                             }
                         }
-                        Err(e) => {
-                            eprintln!("Connection failed: {}", e);
+                    },
+                    Err(e) => {
+                        if let Ok(e_bytes) = DaemonResponse::bytes_err(e) {
+                            let _ = stream.write_all(&(e_bytes.len() as u32).to_le_bytes()).await;
+                            let _ = stream.write_all(&e_bytes).await;
                         }
-                    }
-                }                
+                    },
+                }
+                
+                if let Err(e) = stream.shutdown().await {
+                    eprintln!("Error shutting down stream: {}", e);
+                }
+            });
+        }
+        Err(e) => {
+            eprintln!("Connection failed: {}", e);
+        }
+    }
+}
             }
         }
 
