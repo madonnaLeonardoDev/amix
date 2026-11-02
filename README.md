@@ -47,7 +47,7 @@ A lightweight, high-performance Rust command-line client and daemon for Apple Mu
 ### Option 1: Precompiled Binary
 Download the precompiled binary directly from the release folder inside the repository:
 ```bash
-cp target/release/applemusic-cli /usr/local/bin/
+cp bin/applemusic-cli /usr/local/bin/
 
 ```
 ---
