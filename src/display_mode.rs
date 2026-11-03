@@ -331,91 +331,85 @@ pub async fn run_player_loop(lyrics_enabled: bool) -> Result<(), String> {
 
     let mut cached_display: Option<Display> = None;
 
-    loop {
-            tokio::select! {
-                _ = ticker.tick() => {
-                    if let Some(d) = display.as_mut(){
-                        let current_id = d.track.id.clone();
-
-                        if rendered_id != current_id {
-                            //FULL REDRAW
-                            let is_cache_hit = match &cached_display {
-                                Some(cd) => cd.track.id == d.track.id,
-                                None => false
-                            };
-
-                            if is_cache_hit {
-                                display = cached_display.take();
-
-                                let sender_clone = sender.clone();
-                                let stream_clone = stream.clone();
-                                tokio::spawn(async move {
-                                    let next_display;
-                                    {
-                                        let mut s = stream_clone.lock().await;
-                                        next_display = match Display::load_next(&mut s).await{
-                                            Ok(d) => d,
-                                            Err(_) => return
-                                        };
-                                    }
-                                    if let Err(e) = sender_clone.send(next_display).await {
-                                        eprintln!("Receiver dropped, couldn't send data: {}", e);
-                                    }
-                                });
-                            } else {
-                                   let mut s = stream.lock().await;
-                                    display = Display::load_current(&mut s).await?;
-
-                                    let sender_clone = sender.clone();
-                                let stream_clone = stream.clone();
-                                tokio::spawn(async move {
-                                    let next_display;
-                                    {
-                                        let mut s = stream_clone.lock().await;
-                                        next_display = match Display::load_next(&mut s).await{
-                                            Ok(d) => d,
-                                            Err(_) => return
-                                        };
-                                    }
-                                    if let Err(e) = sender_clone.send(next_display).await {
-                                        eprintln!("Receiver dropped, couldn't send data: {}", e);
-                                    }
-                                });
-                            }
-
-                            if let Some(d) = display.as_mut() {
-                                if d.draw().is_err() {
-                                    continue;
-                                }
-
-                                if lyrics_enabled {
-                                    if d.render_lyrics().is_err() {
-                                        continue;
-                                    }
-                                }
-                            }
-                            rendered_id = current_id;
-                        } else {
-                            //SCREEN UPDATE
-                            if d.render_light_tick().is_err(){
-                                continue;
-                            }
-                            {   let mut s =stream.lock().await;
-                                if d.update_track(&mut s).await.is_err(){
-                                    continue;
-                                }
-                            }
-                        }
+loop {
+    tokio::select! {
+        _ = ticker.tick() => {
+            if let Some(d) = display.as_mut() {
+                // 1. Poll the stream FIRST to update playback position and current state
+                {
+                    let mut s = stream.lock().await;
+                    if d.update_track(&mut s).await.is_err() {
+                        continue;
                     }
                 }
 
-                Some(d) = receiver.recv() => {
-                    cached_display = d;
+                // 2. NOW check the true current track ID from the freshly updated display
+                let current_id = d.track.id.clone();
+
+                if rendered_id != current_id {
+                    // --- FULL REDRAW (Track Changed) ---
+                    let is_cache_hit = match &cached_display {
+                        Some(cd) => cd.track.id == current_id,
+                        None => false
+                    };
+
+                    if is_cache_hit {
+                        display = cached_display.take();
+                    } else {
+                        let mut s = stream.lock().await;
+                        display = Display::load_current(&mut s).await?;
+                    }
+
+                    // Spawn background prefetch for the next track
+                    let sender_clone = sender.clone();
+                    let stream_clone = stream.clone();
+                    tokio::spawn(async move {
+                        let next_display;
+                        {
+                            let mut s = stream_clone.lock().await;
+                            next_display = match Display::load_next(&mut s).await {
+                                Ok(d) => d,
+                                Err(_) => return
+                            };
+                        }
+                        if let Err(e) = sender_clone.send(next_display).await {
+                            eprintln!("Receiver dropped, couldn't send data: {}", e);
+                        }
+                    });
+
+                    // Draw the new track and update rendered_id
+                    if let Some(new_d) = display.as_mut() {
+                        if new_d.draw().is_err() {
+                            continue;
+                        }
+
+                        if lyrics_enabled {
+                            if new_d.render_lyrics().is_err() {
+                                continue;
+                            }
+                        }
+                        rendered_id = new_d.track.id.clone();
+                    }
+                } else {
+                    // --- SCREEN UPDATE (Light Tick - Same Track) ---
+                    if d.render_light_tick().is_err() {
+                        continue;
+                    }
+
+                    if lyrics_enabled {
+                        if d.render_lyrics().is_err() {
+                            continue;
+                        }
+                    }
                 }
-
-
             }
+        }
+
+        Some(d) = receiver.recv() => {
+            cached_display = d;
+        }
     }
+}
 }
 
 async fn fetch_artwork(template_url: &str, width: u32, height: u32) -> Result<Vec<u8>, String> {
