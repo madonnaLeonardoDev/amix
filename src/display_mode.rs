@@ -1,6 +1,8 @@
 
 use reqwest;
+use tokio::sync::{Mutex, mpsc};
 use std::os::unix::io::AsRawFd;
+use std::sync::{Arc};
 use crate::Commands;
 use crate::lyrics::{LyricLine, get_current_lyrics, request_lyric};
 use crate::browser_interface::{Track};
@@ -274,8 +276,8 @@ impl Display {
 }
 
 pub async fn run_player_loop(lyrics_enabled: bool) -> Result<(), String> {
-    let mut stream = match UnixStream::connect(DAEMON_SOCKET_PATH.as_path()).await {
-        Ok(s) => s,
+    let stream = match UnixStream::connect(DAEMON_SOCKET_PATH.as_path()).await {
+        Ok(s) => Arc::new(Mutex::new(s)),
         Err(e) => {
             return Err(format!("Daemon connection failed: {}. Is it running?", e));
         }
@@ -285,26 +287,30 @@ pub async fn run_player_loop(lyrics_enabled: bool) -> Result<(), String> {
             .map_err(|e| format!("Failed serializing internal Command: {}", e))?;
         let len_prefix = (request.len() as u32).to_le_bytes();
 
-        if let Err(e) = stream.write_all(&len_prefix).await {
-            return Err(format!("Could not write to stream length prefix: {}", e))
-        }
-        if let Err(e) = stream.write_all(&request).await {
+        let mut len_buf = [0u8; 4];
+        let mut buf;
+        {   
+            let mut s = stream.lock().await;
+            if let Err(e) = s.write_all(&len_prefix).await {
+                return Err(format!("Could not write to stream length prefix: {}", e))
+            }
+            if let Err(e) = s.write_all(&request).await {
 
-            return Err(format!("Could not write to stream payload: {}", e))
-        }
-    //Read empty vec returned by data to sync
+                return Err(format!("Could not write to stream payload: {}", e))
+            }
+        //Read empty vec returned by data to sync
 
-    let mut len_buf = [0u8; 4];
-        if let Err(e) = stream.read_exact(&mut len_buf).await {
-            return Err(format!("Error reading len buf: {}", e))
-        }
-        let len = u32::from_le_bytes(len_buf) as usize;
+        
+            if let Err(e) = s.read_exact(&mut len_buf).await {
+                return Err(format!("Error reading len buf: {}", e))
+            }
+            let len = u32::from_le_bytes(len_buf) as usize;
 
-        let mut buf = vec![0u8; len];
-        if let Err(e) = stream.read_exact(&mut buf).await {
-            return Err(format!("Error reading payload buf: {}", e))
+            buf = vec![0u8; len];
+            if let Err(e) = s.read_exact(&mut buf).await {
+                return Err(format!("Error reading payload buf: {}", e))
+            }
         }
-
         match DaemonResponse::get_res(buf)? {
             DaemonResponse::Error(e) => return Err(e),
             DaemonResponse::Success(_) => {}
@@ -312,52 +318,103 @@ pub async fn run_player_loop(lyrics_enabled: bool) -> Result<(), String> {
 
 
     let mut ticker = interval(Duration::from_millis(100));
-    let mut prev_id: Option<String> = None;
-    let mut display = Display::load_current(&mut stream).await?;
+    let mut rendered_id: Option<String> = None;
+    let mut display;
+    {
+        let mut s = stream.lock().await;
+        display = Display::load_current(&mut s).await?;
+    }
+    
+    let (sender,mut receiver) = mpsc::channel::<Option<Display>>(1);
+
+    //NON BLOCK CACHE NEXT TRACK
+
+    let mut cached_display: Option<Display> = None;
+
     loop {
-            if let Some(d) = display.as_mut() {
+            tokio::select! {
+                _ = ticker.tick() => {
+                    if let Some(d) = display.as_mut(){
+                        let current_id = d.track.id.clone();
 
-                if prev_id!= d.track.id {
-                //Heavy Redraw
+                        if rendered_id != current_id {
+                            //FULL REDRAW
+                            let is_cache_hit = match &cached_display {
+                                Some(cd) => cd.track.id == d.track.id,
+                                None => false
+                            };
 
-                match Display::load_current(&mut stream).await?{
-                    Some(new_d) => *d=new_d,
-                    None => continue
-                }
+                            if is_cache_hit {
+                                display = cached_display.take();
 
-                if let Err(_) = d.draw() {
-                    continue;
-                };
+                                let sender_clone = sender.clone();
+                                let stream_clone = stream.clone();
+                                tokio::spawn(async move {
+                                    let next_display;
+                                    {
+                                        let mut s = stream_clone.lock().await;
+                                        next_display = match Display::load_next(&mut s).await{
+                                            Ok(d) => d,
+                                            Err(_) => return
+                                        };
+                                    }
+                                    if let Err(e) = sender_clone.send(next_display).await {
+                                        eprintln!("Receiver dropped, couldn't send data: {}", e);
+                                    }
+                                });
+                            } else {
+                                   let mut s = stream.lock().await;
+                                    display = Display::load_current(&mut s).await?;
 
-                if lyrics_enabled {
-                    if let Err(_) = d.render_lyrics() {
-                        continue;
+                                    let sender_clone = sender.clone();
+                                let stream_clone = stream.clone();
+                                tokio::spawn(async move {
+                                    let next_display;
+                                    {
+                                        let mut s = stream_clone.lock().await;
+                                        next_display = match Display::load_next(&mut s).await{
+                                            Ok(d) => d,
+                                            Err(_) => return
+                                        };
+                                    }
+                                    if let Err(e) = sender_clone.send(next_display).await {
+                                        eprintln!("Receiver dropped, couldn't send data: {}", e);
+                                    }
+                                });
+                            }
+
+                            if let Some(d) = display.as_mut() {
+                                if d.draw().is_err() {
+                                    continue;
+                                }
+
+                                if lyrics_enabled {
+                                    if d.render_lyrics().is_err() {
+                                        continue;
+                                    }
+                                }
+                            }
+                            rendered_id = current_id;
+                        } else {
+                            //SCREEN UPDATE
+                            if d.render_light_tick().is_err(){
+                                continue;
+                            }
+                            {   let mut s =stream.lock().await;
+                                if d.update_track(&mut s).await.is_err(){
+                                    continue;
+                                }
+                            }
+                        }
                     }
                 }
 
-                prev_id = d.track.id.clone();
-
-
-            } else {
-                if let Err(e) = d.render_light_tick() {
-                    break Err(format!("Stream desync detected: {}. Reconnecting...", e));
+                Some(d) = receiver.recv() => {
+                    cached_display = d;
                 }
 
-                if lyrics_enabled {
-                    if let Err(_) = d.render_lyrics() {
-                        continue;
-                    }
-                }
 
-                if let Err(_) = d.update_track(&mut stream).await {
-                    continue;
-                }
             }
-            }
-
-            
-
-        ticker.tick().await;
     }
 }
 
