@@ -13,7 +13,7 @@ struct LrcSearchResult {
 }
 
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct LyricLine{
     pub timestamp: u32,
     pub text: String

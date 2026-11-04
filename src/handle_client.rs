@@ -1,4 +1,4 @@
-
+use crate::DaemonResponse;
 use thirtyfour::WebDriver;
 use tokio::net::UnixStream;
 use tokio::io::{AsyncReadExt, BufReader};
@@ -25,9 +25,11 @@ pub async fn handle_client(stream: &mut UnixStream, driver: &WebDriver) -> Resul
 
     let command: Commands = wincode::deserialize(&payload)
         .map_err(|e| format!("Failed Deserializing payload from bytes: {}", e))?;
-    
-    let bytes= wincode::serialize(&command.execute_daemon(driver).await?)
-        .map_err(|e| format!("Failed Serializing Daemon response: {}",e))?;
+    let daemon_res = match command.execute_daemon(driver).await{
+        Ok(r) => (DaemonResponse::Success(r.0), r.1),
+        Err(e) => (DaemonResponse::Error(e.as_bytes().to_vec()), false)
+    };
+    let bytes:Vec<u8>  = wincode::serialize(&daemon_res).map_err(|e| format!("Failed Serializing Daemon response: {}",e))?;
 
     Ok(bytes)
 } 

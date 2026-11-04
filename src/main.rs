@@ -131,9 +131,10 @@ pub enum Commands {
 
     //INTERNAL COMMANDS
     #[command(hide = true)]
-    DisplaModeDaemon
-
-}
+    DisplaModeDaemon,
+    #[command(hide = true)]
+    GetNextTrackMeta,
+}   
 
 fn cmd_to_daemon(cli: Cli) {
             let cmd_as_bytes= wincode::serialize(&cli.command).unwrap();
@@ -166,7 +167,7 @@ fn cmd_to_daemon(cli: Cli) {
                     let len = u32::from_le_bytes(len_b) as usize;
                     let mut buf = vec![0u8; len];
                     if let Err(e) = stream.read_exact(&mut buf) {
-                        eprintln!("Error reading len header bytes from stream: {}", e);
+                        eprintln!("Error reading payload bytes from stream: {}", e);
                         return;
                     }
                     let res = match DaemonResponse::get_res(buf){
@@ -176,23 +177,22 @@ fn cmd_to_daemon(cli: Cli) {
                             return;
                         }
                     };
-                    let res_b = match res {
-                        DaemonResponse::Error(e) => {
-                            eprintln!("{}", e);
-                            return;
+                    match res {
+                        DaemonResponse::Success(b) => {
+                            if let Ok(s) = String::from_utf8(b){
+                                println!("{}", s);
+                            } else {
+                                eprintln!("Error turning Success bytes into string")
+                            }
                         },
-                        DaemonResponse::Success(s) => s
+                        DaemonResponse::Error(b) => {
+                            if let Ok(s) = String::from_utf8(b){
+                                eprintln!("{}", s);
+                            } else {
+                                eprintln!("Error turning Error bytes into string")
+                            }
+                        }
                     };
-
-
-                    if let Ok(s) = String::from_utf8(res_b){
-                        println!("{}", s);
-                    }else {
-                        eprintln!("Error reading len header bytes from stream");
-                        return;
-                    };
-                    
-
                 },
                 Err(_) => {
                     println!("Daemon is not running. Start it first using `startd (sd)`.");

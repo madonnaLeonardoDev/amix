@@ -8,7 +8,6 @@ use crate::browser_interface::MusicDriver;
 #[derive(SchemaRead, SchemaWrite)]
 pub enum DaemonCommands {
     GetCurrentTrackMeta,
-    GetNextTrackMeta,
     PlayToggle,
     Skip,
     Prev,
@@ -30,18 +29,6 @@ impl DaemonCommands {
 
                 return Ok(bytes)
 
-            },
-            DaemonCommands::GetNextTrackMeta => {
-                let track_queue = driver.list_queue().await?;
-
-                let track = track_queue.get(0);
-
-                if track.is_none() {return Ok(vec![0u8])}
-
-                let bytes = wincode::serialize(&track)
-                    .map_err(|e| format!("Failed serializing track data: {}", e))?;
-
-                return Ok(bytes)
             },
             DaemonCommands::PlayToggle => {
                 let script = r#"
@@ -126,7 +113,7 @@ pub async fn handle_persistent_connection(stream:&mut UnixStream, driver: &WebDr
 
     let command: DaemonCommands = wincode::deserialize(&payload)
         .map_err(|e| format!("Failed Deserializing payload from bytes: {}", e))?;
-
+    
     let res = command.execute(driver).await?;
     
     Ok(res)

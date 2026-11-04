@@ -194,7 +194,6 @@ impl Commands {
         },
         Commands::LsQueue => {
             let queue = driver.list_queue().await?;
-
             let formatted_str:String = queue.iter()
             .map(|track| format!("{}",track.pretty_display()))
             .collect();
@@ -219,6 +218,18 @@ impl Commands {
         Commands::DisplaModeDaemon => {
             Ok((vec![0u8; 1], true))
         },
+        Commands::GetNextTrackMeta => {
+                let track_queue = driver.list_queue().await?;
+
+                let track = track_queue.get(1);
+
+                if track.is_none() {return Ok((vec![0u8], false))}
+
+                let bytes = wincode::serialize(&track)
+                    .map_err(|e| format!("Failed serializing track data: {}", e))?;
+
+                return Ok((bytes, false))
+            },
         _=> {
             Err("Invalid Command".to_string())
         }

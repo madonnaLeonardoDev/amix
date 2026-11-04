@@ -1,8 +1,8 @@
-
+use crate::daemon::DaemonResponse;
 use reqwest;
-use tokio::sync::{Mutex, mpsc};
+use tokio_util::sync::CancellationToken;
+use tokio::sync::{mpsc};
 use std::os::unix::io::AsRawFd;
-use std::sync::{Arc};
 use crate::Commands;
 use crate::lyrics::{LyricLine, get_current_lyrics, request_lyric};
 use crate::browser_interface::{Track};
@@ -13,10 +13,11 @@ use tokio::net::UnixStream;
 use tokio::io::{AsyncWriteExt, AsyncReadExt};
 use tokio::time::{Duration, interval};
 use crate::daemon_persistent::DaemonCommands;
-use crate::daemon::DaemonResponse;
+
+#[derive(Debug, Clone)]
 struct Display{
     track: Track,
-    artwork_b: Option<Vec<u8>>,
+    artwork_img: Option<image::DynamicImage>,
     lyrics: Option<Vec<LyricLine>>,
 }
 impl Display {
@@ -44,7 +45,7 @@ impl Display {
         }
 
         let d_res: Vec<u8> = match DaemonResponse::get_res(buf)?{
-            DaemonResponse::Error(e) => return Err(e.to_string()),
+            DaemonResponse::Error(e) => return Err(String::from_utf8(e).unwrap()),
             DaemonResponse::Success(s) => s
         };
 
@@ -57,107 +58,123 @@ impl Display {
         Ok(())
     }
 
-    async fn load_current(stream: &mut UnixStream) -> Result<Option<Self>, String> {
+async fn load_current(stream: &mut UnixStream) -> Result<Option<Self>, String> {
         let request = wincode::serialize(&DaemonCommands::GetCurrentTrackMeta)
             .map_err(|e| format!("Failed serializing internal Command: {}", e))?;
         let len_prefix = (request.len() as u32).to_le_bytes();
 
-        if let Err(e) = stream.write_all(&len_prefix).await {
-            return Err(format!("Could not write to stream length prefix: {}", e))
-        }
-        if let Err(e) = stream.write_all(&request).await {
+        stream.write_all(&len_prefix).await.map_err(|e| e.to_string())?;
+        stream.write_all(&request).await.map_err(|e| e.to_string())?;
 
-            return Err(format!("Could not write to stream payload: {}", e))
-        }
         let mut len_buf = [0u8; 4];
-        if let Err(e) = stream.read_exact(&mut len_buf).await {
-            return Err(format!("Error reading len buf: {}", e))
-        }
+        stream.read_exact(&mut len_buf).await.map_err(|e| e.to_string())?;
         let len = u32::from_le_bytes(len_buf) as usize;
 
         let mut buf = vec![0u8; len];
-        if let Err(e) = stream.read_exact(&mut buf).await {
-            return Err(format!("Error reading payload buf: {}", e))
-        }
+        stream.read_exact(&mut buf).await.map_err(|e| e.to_string())?;
 
-        let d_res: Vec<u8> = match DaemonResponse::get_res(buf)?{
-            DaemonResponse::Error(e) => return Err(e.to_string()),
+        let d_res: Vec<u8> = match DaemonResponse::get_res(buf)? {
+            DaemonResponse::Error(e) => return Err(String::from_utf8(e).unwrap()),
             DaemonResponse::Success(s) => s
         };
 
         let track: Option<Track> = wincode::deserialize(&d_res)
-            .map_err(|e| format!("Failed Deserializng Track: {}", e))?;
+            .map_err(|e| format!("Failed Deserializing Track: {}", e))?;
 
-        if let Some(track) = track  {
-        let mut artwork_b = None;
+        if let Some(track) = track {
+            // Fetch artwork and lyrics concurrently
+            let art_fut = async {
+                if let Some(a) = track.artwork.as_ref() {
+                    let w = if a.width == 0 { 600 } else { a.width };
+                    let h = if a.height == 0 { 600 } else { a.height };
+                    fetch_artwork(&a.url, w, h).await.ok()
+                } else {
+                    None
+                }
+            };
 
-        if let Some(a) = track.artwork.as_ref() {
-            match fetch_artwork(&a.url, a.width, a.height).await {
-                Ok(a) => artwork_b = Some(a),
-                Err(e) => return Err(e)
-            }
+            let lyric_fut = async {
+                request_lyric(&track).await.ok().flatten()
+            };
+
+                    let (artwork_b, lyrics) = tokio::join!(art_fut, lyric_fut);
+
+        let artwork_img: Option<image::DynamicImage> = match artwork_b {
+            Some(img) => {
+                tokio::task::spawn_blocking(move || {
+                    image::load_from_memory(&img).ok()
+                })
+                .await
+                .ok()
+                .flatten()
+            },
+            None => None
         };
-
-        let lyrics = request_lyric(&track).await?;
-        
-
-        return Ok(Some(
-            Self { track, artwork_b, lyrics}
-            ))
+        return Ok(Some(Self { track, artwork_img, lyrics }));
         }
-        return Ok(None);
+        Ok(None)
     }
 
-    async fn load_next(stream: &mut UnixStream) -> Result<Option<Self>, String> {
-        let request = wincode::serialize(&DaemonCommands::GetNextTrackMeta)
+async fn load_next() -> Result<Option<Self>, String> {
+        // Independent connection so it never blocks or locks the main UI stream
+        let mut s = UnixStream::connect(DAEMON_SOCKET_PATH.as_path()).await
+            .map_err(|e| format!("Daemon connection failed: {}", e))?;
+
+        let request = wincode::serialize(&Commands::GetNextTrackMeta)
             .map_err(|e| format!("Failed serializing internal Command: {}", e))?;
         let len_prefix = (request.len() as u32).to_le_bytes();
 
-        if let Err(e) = stream.write_all(&len_prefix).await {
-            return Err(format!("Could not write to stream length prefix: {}", e))
-        }
-        if let Err(e) = stream.write_all(&request).await {
+        s.write_all(&len_prefix).await.map_err(|e| e.to_string())?;
+        s.write_all(&request).await.map_err(|e| e.to_string())?;
 
-            return Err(format!("Could not write to stream payload: {}", e))
-        }
         let mut len_buf = [0u8; 4];
-        if let Err(e) = stream.read_exact(&mut len_buf).await {
-            return Err(format!("Error reading len buf: {}", e))
-        }
+        s.read_exact(&mut len_buf).await.map_err(|e| e.to_string())?;
         let len = u32::from_le_bytes(len_buf) as usize;
 
         let mut buf = vec![0u8; len];
-        if let Err(e) = stream.read_exact(&mut buf).await {
-            return Err(format!("Error reading payload buf: {}", e))
-        }
-        let d_res: Vec<u8> = match DaemonResponse::get_res(buf)?{
-            DaemonResponse::Error(e) => return Err(e.to_string()),
+        s.read_exact(&mut buf).await.map_err(|e| e.to_string())?;
+
+        let d_res: Vec<u8> = match DaemonResponse::get_res(buf)? {
+            DaemonResponse::Error(e) => return Err(String::from_utf8(e).unwrap()),
             DaemonResponse::Success(s) => s
         };
 
         let track: Option<Track> = wincode::deserialize(&d_res)
             .map_err(|e| e.to_string())?;
 
-        if track.is_none() {
-            return Ok(None);
-        }
-        let track = track.unwrap();
+        let track = match track {
+            Some(t) => t,
+            None => return Ok(None),
+        };
 
-        let mut artwork_b = None;
-
-        if let Some(a) = track.artwork.as_ref() {
-            match fetch_artwork(&a.url, a.width, a.height).await {
-                Ok(a) => artwork_b = Some(a),
-                Err(e) => return Err(e)
+        let art_fut = async {
+            if let Some(a) = track.artwork.as_ref() {
+                let w = if a.width == 0 { 600 } else { a.width };
+                let h = if a.height == 0 { 600 } else { a.height };
+                fetch_artwork(&a.url, w, h).await.ok()
+            } else {
+                None
             }
         };
 
-        let lyrics = request_lyric(&track).await?;
-        
+        let lyric_fut = async {
+            request_lyric(&track).await.ok().flatten()
+        };
 
-        Ok(Some(
-            Self {track, artwork_b, lyrics }
-        ))
+        let (artwork_b, lyrics) = tokio::join!(art_fut, lyric_fut);
+
+        let artwork_img: Option<image::DynamicImage> = match artwork_b {
+            Some(img) => {
+                tokio::task::spawn_blocking(move || {
+                    image::load_from_memory(&img).ok()
+                })
+                .await
+                .ok()
+                .flatten()
+            },
+            None => None
+        };
+        Ok(Some(Self { track, artwork_img, lyrics }))
     }
 
     fn draw(&self) -> Result<(), Box<dyn std::error::Error>> {
@@ -169,9 +186,8 @@ impl Display {
 
             stdout.execute(terminal::Clear(terminal::ClearType::All))?;
             
-            if let Some(v) = self.artwork_b.as_ref() {
-                let img = image::load_from_memory(v)?;
-
+            if let Some(v) = self.artwork_img.as_ref() {
+                let img = v;
                 let conf = viuer::Config {
                     width: Some(40),
                     height: Some(20),
@@ -181,7 +197,7 @@ impl Display {
                     ..Default::default()
                 };
 
-                viuer::print(&img, &conf)?;
+                viuer::print(img, &conf)?;
             }
         
         let text_x = 45;
@@ -258,15 +274,15 @@ impl Display {
 
     let [prev, current, next] = lyrics;
 
-    // 1. Render Previous Line (Dimmed)
+    //Render Previous Line (Dimmed)
     stdout.execute(cursor::MoveTo(text_x, start_y))?;
     print!("\x1b[K\x1b[2m{}\x1b[0m", prev);
 
-    // 2. Render Current Line (Bold/Bright with a pointer)
+    //Render Current Line (Bold/Bright with a pointer)
     stdout.execute(cursor::MoveTo(text_x, start_y + 2))?;
     print!("\x1b[K\x1b[1m> {}\x1b[0m", current);
 
-    // 3. Render Next Line (Dimmed)
+    //Render Next Line (Dimmed)
     stdout.execute(cursor::MoveTo(text_x, start_y + 4))?;
     print!("\x1b[K\x1b[2m{}\x1b[0m", next);
 
@@ -276,8 +292,8 @@ impl Display {
 }
 
 pub async fn run_player_loop(lyrics_enabled: bool) -> Result<(), String> {
-    let stream = match UnixStream::connect(DAEMON_SOCKET_PATH.as_path()).await {
-        Ok(s) => Arc::new(Mutex::new(s)),
+    let mut stream = match UnixStream::connect(DAEMON_SOCKET_PATH.as_path()).await {
+        Ok(s) => s,
         Err(e) => {
             return Err(format!("Daemon connection failed: {}. Is it running?", e));
         }
@@ -289,30 +305,27 @@ pub async fn run_player_loop(lyrics_enabled: bool) -> Result<(), String> {
 
         let mut len_buf = [0u8; 4];
         let mut buf;
-        {   
-            let mut s = stream.lock().await;
-            if let Err(e) = s.write_all(&len_prefix).await {
+            if let Err(e) = stream.write_all(&len_prefix).await {
                 return Err(format!("Could not write to stream length prefix: {}", e))
             }
-            if let Err(e) = s.write_all(&request).await {
+            if let Err(e) = stream.write_all(&request).await {
 
                 return Err(format!("Could not write to stream payload: {}", e))
             }
         //Read empty vec returned by data to sync
 
         
-            if let Err(e) = s.read_exact(&mut len_buf).await {
+            if let Err(e) = stream.read_exact(&mut len_buf).await {
                 return Err(format!("Error reading len buf: {}", e))
             }
             let len = u32::from_le_bytes(len_buf) as usize;
 
             buf = vec![0u8; len];
-            if let Err(e) = s.read_exact(&mut buf).await {
+            if let Err(e) = stream.read_exact(&mut buf).await {
                 return Err(format!("Error reading payload buf: {}", e))
             }
-        }
         match DaemonResponse::get_res(buf)? {
-            DaemonResponse::Error(e) => return Err(e),
+            DaemonResponse::Error(e) => return Err(String::from_utf8(e).unwrap()),
             DaemonResponse::Success(_) => {}
         };
 
@@ -320,69 +333,46 @@ pub async fn run_player_loop(lyrics_enabled: bool) -> Result<(), String> {
     let mut ticker = interval(Duration::from_millis(100));
     let mut rendered_id: Option<String> = None;
     let mut display;
-    {
-        let mut s = stream.lock().await;
-        display = Display::load_current(&mut s).await?;
-    }
+        display = Display::load_current(&mut stream).await?;
     
     let (sender,mut receiver) = mpsc::channel::<Option<Display>>(1);
 
-    //NON BLOCK CACHE NEXT TRACK
-
     let mut cached_display: Option<Display> = None;
-
+    let mut active_token: Option<CancellationToken> = None;
 loop {
     tokio::select! {
         _ = ticker.tick() => {
             if let Some(d) = display.as_mut() {
-                // 1. Poll the stream FIRST to update playback position and current state
                 {
-                    let mut s = stream.lock().await;
-                    if d.update_track(&mut s).await.is_err() {
+                    if d.update_track(&mut stream).await.is_err() {
                         continue;
                     }
                 }
-
-                // 2. NOW check the true current track ID from the freshly updated display
                 let current_id = d.track.id.clone();
 
                 if rendered_id != current_id {
-                    // --- FULL REDRAW (Track Changed) ---
-                    let is_cache_hit = match &cached_display {
-                        Some(cd) => cd.track.id == current_id,
+                    //CLEAR SCREEN
+                    let mut stdout = stdout();
+                    let _ = stdout.execute(terminal::Clear(terminal::ClearType::All));
+
+                    // FULL REDRAW
+                    let is_cache_hit:bool = match &cached_display {
+                        Some(cd) => {
+                            cd.track.id == current_id
+                        },
                         None => false
                     };
-
                     if is_cache_hit {
                         display = cached_display.take();
                     } else {
-                        let mut s = stream.lock().await;
-                        display = Display::load_current(&mut s).await?;
-                    }
-
-                    // Spawn background prefetch for the next track
-                    let sender_clone = sender.clone();
-                    let stream_clone = stream.clone();
-                    tokio::spawn(async move {
-                        let next_display;
-                        {
-                            let mut s = stream_clone.lock().await;
-                            next_display = match Display::load_next(&mut s).await {
-                                Ok(d) => d,
-                                Err(_) => return
-                            };
-                        }
-                        if let Err(e) = sender_clone.send(next_display).await {
-                            eprintln!("Receiver dropped, couldn't send data: {}", e);
-                        }
-                    });
+                        display = Display::load_current(&mut stream).await?;
+                    } 
 
                     // Draw the new track and update rendered_id
                     if let Some(new_d) = display.as_mut() {
                         if new_d.draw().is_err() {
                             continue;
                         }
-
                         if lyrics_enabled {
                             if new_d.render_lyrics().is_err() {
                                 continue;
@@ -390,8 +380,36 @@ loop {
                         }
                         rendered_id = new_d.track.id.clone();
                     }
+
+                    // Spawn background prefetch for the next track
+                    let sender_clone = sender.clone();
+                    if let Some(old_token) = active_token {
+                        old_token.cancel();
+                    }
+                    let token = CancellationToken::new();
+                    active_token = Some(token.clone());
+                    tokio::spawn(async move {
+                        tokio::select! {
+                            _ = token.cancelled() => {
+                                return;
+                            }
+                            res = async {
+                                Display::load_next().await
+                            } => {
+                                let next_display = match res {
+                                    Ok(d) => d,
+                                    Err(_) => return,
+                                };
+                                if token.is_cancelled() {return};
+
+                                if let Err(e) = sender_clone.send(next_display).await {
+                                    eprintln!("Receiver dropped, couldn't send data: {}", e);
+                                }
+                            }
+                        }
+                    });
                 } else {
-                    // --- SCREEN UPDATE (Light Tick - Same Track) ---
+                    //SCREEN UPDATE
                     if d.render_light_tick().is_err() {
                         continue;
                     }

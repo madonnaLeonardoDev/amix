@@ -108,16 +108,16 @@ pub enum SearchResult {
 }
 
 pub trait MusicDriver {
-    async fn search(&self, query: &str, item_type: &ItemType, is_library: bool) -> Result<SearchResult, String>;
+    async fn search(&self, query: &str, item_type: &ItemType, is_library: bool) -> Result<SearchResult, String>; 
     async fn play_next(&self, item_type: &ItemType, id: &str) -> Result<String, String>;
-    async fn play(&self) -> Result<(), String>;
-    async fn pause(&self) -> Result<(), String>;
-    async fn next_track(&self) -> Result<(), String>;
+    async fn play(&self) -> Result<(), String>; 
+    async fn pause(&self) -> Result<(), String>; 
+    async fn next_track(&self) -> Result<(), String>; 
     async fn previous_track(&self) -> Result<(), String>;
     async fn shuffle_toggle(&self) -> Result<i64, String>;
-    async fn list_library_playlists(&self) -> Result<Vec<Playlist>, String>;
-    async fn get_current_track(&self) -> Result<Option<Track>, String>;
-    async fn clear_queue(&self) -> Result<(), String>;
+    async fn list_library_playlists(&self) -> Result<Vec<Playlist>, String>; 
+    async fn get_current_track(&self) -> Result<Option<Track>, String>; 
+    async fn clear_queue(&self) -> Result<(), String>; 
     async fn list_queue(&self) -> Result<Vec<Track>, String>;
     async fn volume(&self, val: Option<u32>) -> Result<i32, String>;
 }
@@ -417,12 +417,15 @@ return (() => {
     let script = r#"
         return (async () => {
         let res = MusicKit.getInstance().queue._queueItems || [];
-        return res.map(e => ({
+        let queue_position = MusicKit.getInstance().queue._position || 0;
+        let queue = res.slice(queue_position);
+        return queue.map(e => ({
             id: e.item.id,
             title: e.item.attributes.name,
             artist: e.item.attributes.artistName,
             album: e.item.attributes.albumName,
-            duration_ms: e.item.attributes.durationInMillis
+            duration_ms: e.item.attributes.durationInMillis,
+            artwork: e.item.attributes.artwork
         }));
     })();
     "#;
