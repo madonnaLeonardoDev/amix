@@ -5,7 +5,7 @@ pub static BROWSER_PROFILE_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
     let path = std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("~/"))
-        .join(".config/applemusic-cli_daemon/browser-profile");
+        .join(".config/amix/browser-profile");
 
     // Automatically create the directory if it doesn't exist
     std::fs::create_dir_all(&path)
@@ -15,25 +15,25 @@ pub static BROWSER_PROFILE_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
 });
 
 pub static DAEMON_ERR_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
-    std::env::temp_dir().join("applemusic-cli_daemon.err")
+    std::env::temp_dir().join("amix_daemon.err")
 });
 pub static DAEMON_OUT_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
-    std::env::temp_dir().join("applemusic-cli_daemon.out")
+    std::env::temp_dir().join("amix_daemon.out")
 });
 
 pub static DAEMON_SOCKET_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
-    std::env::temp_dir().join("applemusic-cli_daemon.sock")
+    std::env::temp_dir().join("amix_daemon.sock")
 });
 
 pub static DAEMON_PID_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
-    std::env::temp_dir().join("applemusic-cli_daemon.pid")
+    std::env::temp_dir().join("amix_daemon.pid")
 });
 
 pub static GECKO_PID_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
-    std::env::temp_dir().join("applemusic-cli_gecko.pid")
+    std::env::temp_dir().join("amix_gecko.pid")
 });
 
 pub static BROWSER_PID_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
-    std::env::temp_dir().join("applemusic-cli_browser.pid")
+    std::env::temp_dir().join("amix_browser.pid")
 });
 

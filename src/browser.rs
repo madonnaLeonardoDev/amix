@@ -9,7 +9,6 @@ pub struct BrowserState {
 }
 
 pub async fn init_browser(head: bool) -> Result<BrowserState, String> {
-    // 3. CLEAN UP STALE FIREFOX PROFILE LOCK
 let lock_file = BROWSER_PROFILE_PATH.join("lock");
 if lock_file.exists() {
     if let Err(e) = fs::remove_file(&lock_file) {
@@ -19,7 +18,6 @@ if lock_file.exists() {
     }
 }
 
-    // 1. CLEAN UP STALE GECKO
     if Path::new(&*GECKO_PID_PATH).exists() {
         if let Ok(pid_str) = fs::read_to_string(&*GECKO_PID_PATH) {
             match pid_str.trim().parse::<i32>() {
@@ -37,7 +35,6 @@ if lock_file.exists() {
         }
     }
 
-    // 2. CLEAN UP STALE BROWSER (if tracked)
     if Path::new(&*BROWSER_PID_PATH).exists() {
         if let Ok(pid_str) = fs::read_to_string(&*BROWSER_PID_PATH) {
             match pid_str.trim().parse::<i32>() {
@@ -55,7 +52,6 @@ if lock_file.exists() {
         }
     }
 
-    // 3. GET DYNAMIC PORT
     let temp_listener = std::net::TcpListener::bind("127.0.0.1:0")
         .map_err(|e| format!("Failed to find a free port: {}", e))?;
     
@@ -64,7 +60,7 @@ if lock_file.exists() {
         .port();
     drop(temp_listener);
 
-    // 4. Spawn geckodriver in the background
+
     let geckodriver_process = Command::new("geckodriver")
         .arg("--port")
         .arg(dynamic_port.to_string())
@@ -73,7 +69,6 @@ if lock_file.exists() {
         .spawn()
         .map_err(|e| format!("Failed to start geckodriver: {}", e))?;
 
-    // CRITICAL FIX: Write the new geckodriver PID to disk so cleanup can find it next time!
     let child_pid = geckodriver_process.id();
     if let Err(e) = fs::write(&*GECKO_PID_PATH, child_pid.to_string()) {
         eprintln!("Failed to write gecko PID file: {}", e);
@@ -81,7 +76,7 @@ if lock_file.exists() {
 
     sleep(Duration::from_millis(500)).await;
 
-    // 5. Configure Firefox capabilities with persistent profile path
+
     let mut caps = DesiredCapabilities::firefox();
     
     if !head {
@@ -89,21 +84,18 @@ if lock_file.exists() {
     }
     
     
-    // Convert BROWSER_PROFILE_PATH to a string and pass it to Firefox arguments
     if let Some(profile_path) = BROWSER_PROFILE_PATH.to_str() {
-    // 1. Resolve to a absolute path (Geckodriver crashes without this)
     let abs_path = std::fs::canonicalize(profile_path)
         .map_err(|e| format!("Failed to canonicalize path: {}", e))?
         .to_string_lossy()
         .to_string();
 
-    // 2. Pass --profile (DOUBLE DASH) and the absolute path
     caps.add_arg("--profile").map_err(|e| e.to_string())?;
     caps.add_arg(&abs_path).map_err(|e| e.to_string())?;
     } else {
         return Err("Profile path returned None".to_string());
     }
-    // 6. Connect thirtyfour to the running geckodriver instance
+
     let driver = WebDriver::new(format!("http://127.0.0.1:{}", dynamic_port), caps)
         .await
         .map_err(|e| format!("Error connecting WebDriver to port {}: {}", dynamic_port, e))?;
@@ -127,43 +119,56 @@ pub async fn open_apple_music(driver: &WebDriver) -> Result<(), String> {
 
 
 pub async fn is_logged_in(driver: &WebDriver) -> Result<bool, String> {
-    // Notice the "return" keyword! thirtyfour executes scripts differently.
-    // It must return a value back to Rust explicitly.
     let script = "return document.querySelector('.account-menu > amp-contextual-menu-button:nth-child(1) > button:nth-child(1)') !== null;";
 
     let eval_result = driver.execute(script, vec![])
         .await
         .map_err(|e| e.to_string())?;
-
-    // Extract the boolean from the returned JSON value
     let is_logged_in = eval_result.json().as_bool().unwrap_or(false);
 
     Ok(is_logged_in)
 }
 
 pub async fn apple_music_auth() -> Result<(), String> {
-    // state contains both the active browser driver and the geckodriver process handle
-    let mut state = init_browser(false).await?;
-    
-    open_apple_music(&state.driver).await?;
+    println!("Checking authentication status...");
 
-    if is_logged_in(&state.driver).await? {
-        println!("User already logged in using saved session");
-    } else {
-        println!("Please log in manually thru the browser window...");
+    // 1. Attempt headless check; if Apple Music rejects/crashes headless, catch it
+    let headless_attempt = async {
+        let mut state = init_browser(false).await?;
+        open_apple_music(&state.driver).await?;
+        let logged_in = is_logged_in(&state.driver).await?;
+        state.driver.quit().await.map_err(|e| e.to_string())?;
+        let _ = state.geckodriver_process.kill();
+        Ok::<bool, String>(logged_in)
+    }.await;
+
+    let logged_in = match headless_attempt {
+        Ok(true) => {
+            println!("User already logged in using saved session.");
+            return Ok(());
+        }
+        _ => {
+            println!("Headless check bypassed or session not found. Launching headed browser...");
+            false
+        }
+    };
+
+    if !logged_in {
+        // 2. Launch in headed mode for manual login
+        let mut state = init_browser(true).await?;
+        open_apple_music(&state.driver).await?;
+
+        println!("Please log in manually through the browser window...");
 
         while !is_logged_in(&state.driver).await? {
             sleep(Duration::from_secs(3)).await;
         }
 
-        println!("Logged in succesfully!");
-    }
+        println!("Logged in successfully!");
 
-    // 1. Close the browser window and flush session data
-    state.driver.quit().await.map_err(|e| e.to_string())?;
-    
-    // 2. Kill the background geckodriver server process cleanly
-    state.geckodriver_process.kill().map_err(|e| e.to_string())?;
+        state.driver.quit().await.map_err(|e| e.to_string())?;
+        state.geckodriver_process.kill().map_err(|e| e.to_string())?;
+    }
 
     Ok(())
 }

@@ -1,13 +1,13 @@
-# applemusic-cli
+# amix
 
 A lightweight, high-performance Rust command-line client and daemon for Apple Music on Linux. 
 
-`applemusic-cli` bypasses the slow, heavy browser UI by interacting directly with the **MusicKit V3 API** through a headless Firefox background instance. This approach completely circumvents DRM constraints while stripping away browser overhead and eliminating long event pipelines for instant command response times.
+`amix` bypasses the slow, heavy browser UI by interacting directly with the **MusicKit V3 API** through a headless Firefox background instance. This approach completely circumvents DRM constraints while stripping away browser overhead and eliminating long event pipelines for instant command response times.
 
 ---
 
 <p align="center">
-  <img src="assets/display-demo.png" alt="applemusic-cli Terminal Display with Cover Art and Scrolling Lyrics" width="800">
+  <img src="assets/display-demo.png" alt="amix Terminal Display with Cover Art and Scrolling Lyrics" width="800">
 </p>
 
 ---
@@ -47,7 +47,7 @@ A lightweight, high-performance Rust command-line client and daemon for Apple Mu
 ### Option 1: Precompiled Binary
 Download the precompiled binary directly from the release folder inside the repository:
 ```bash
-cp bin/applemusic-cli /usr/local/bin/
+cp bin/amix /usr/local/bin/
 
 ```
 ---
@@ -75,8 +75,8 @@ applemusic-cli -h
 To see specific flags, options, and syntax for any subcommand (e.g., `startd` or `search`):
 
 ```
-applemusic-cli startd --help
-applemusic-cli search --help
+amix startd --help
+amix search --help
 
 
 ```
@@ -92,7 +92,8 @@ If Firefox fails to play tracks due to missing DRM plugins in a clean headless i
 2. Copy your existing Firefox profile containing the DRM configuration into the app's designated profile directory:
 
    ```
-   cp -r ~/.mozilla/firefox/<your-profile-folder>/* ~/.config/applemusic-cli_daemon/browser-profile/
+   rm -r  ~/.config/amix/browser-profile/*
+   cp -r ~/.mozilla/firefox/<your-profile-folder>/* ~/.config/amix/browser-profile/
    
    
    ```
@@ -104,7 +105,7 @@ If Firefox blocks automated playback commands upon startup:
 1. Start the daemon in headed mode:
 
    ```
-   applemusic-cli startd -H
+   amix startd -H
    
    
    ```
@@ -113,6 +114,6 @@ If Firefox blocks automated playback commands upon startup:
 
 3. Close the window and resume running the daemon headlessly.
 
-## 🛠️ Maintenance & Future Updates
+## Maintenance & Future Updates
 
 This project is actively maintained. Bug fixes, performance tweaks, and feature improvements will be pushed regularly. Feel free to open issues or submit pull requests on the GitHub repository!
