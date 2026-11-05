@@ -2,10 +2,9 @@ use std::fs;
 use std::os::unix::net::UnixStream;
 use std::io::{Write, Read};
 use std::net::Shutdown;
-use clap::{Parser, Subcommand};
 use image::EncodableLayout;
 use serde::{Deserialize};
-use wincode_derive::{SchemaRead, SchemaWrite};
+
 use crate::paths::{DAEMON_SOCKET_PATH, CONFIG_PATH};
 use crate::daemon::{DaemonResponse, kill_all, start_daemon};
 use crate::display_mode::run_player_loop;
@@ -19,125 +18,8 @@ mod daemon_controls;
 mod display_mode;
 mod lyrics;
 mod daemon_persistent;
-
-#[derive(Parser, SchemaWrite, SchemaRead)]
-struct Cli {
-    #[command(subcommand)]
-    command: Commands,
-}
-
-#[derive(Subcommand, SchemaWrite, SchemaRead)]
-pub enum Commands {
-
-    ///Start the background services that handle the music player
-    #[command(visible_alias = "sd")]
-    Startd{
-        #[arg(short = 'H', long)]
-        head:bool
-    },
-
-    ///Kill all the services that handle the music player
-    #[command(visible_alias = "kd")]
-    Killd,
-
-    ///Search a song, album, or playlist by query
-    #[command(visible_alias = "s")]
-    Search {
-
-        ///Specify the targets type (a, album | p, playlist | s, song)
-        #[arg(short = 't', long)]
-        stype: String,
-
-        ///Search query
-        #[arg(short, long)]
-        query: String,
-
-        ///Play Next
-        #[arg(short, long)]
-        next: bool,
-
-        ///Play now
-        #[arg(short = 'p', long = "instaplay")]
-        insta_play: bool,
-
-        ///Search in your library
-        #[arg(short, long)]
-        library: bool
-    },
-
-    ///Play by id
-    #[command(visible_alias = "pid")]
-    Playid {
-        ///Specify tracks type
-        #[arg(short = 't', long)]
-        stype: String,
-
-        ///Items ID
-        #[arg(short, long)]
-        id: String,
-
-        ///Play Next
-        #[arg(short, long)]
-        next: bool
-    },
-
-    ///Next Song
-    #[command(visible_alias = "nx")]
-    Next,
-
-    ///Previous Song
-    #[command(visible_alias = "pv")]
-    Prev,
-
-    ///Toggle play
-    #[command(visible_alias = "pp")]
-    PlayPause,
-
-    ///Shuffle queue
-    #[command(visible_alias = "sh")]
-    Shuffle,
-
-    ///Get current track playing
-    #[command(visible_alias = "c")]
-    Current,
-
-    ///List all library playlists
-    #[command(visible_alias = "lspl")]
-    LsPlaylists,
-
-    ///Clear the queue
-    #[command(visible_alias = "cq")]
-    ClearQueue,
-
-    ///List the queue
-    #[command(visible_alias = "lq")]
-    LsQueue,
-
-    ///Get or Adjust volume
-    #[command(visible_alias = "v")]
-    Volume {
-        #[arg(
-            trailing_var_arg = true,
-            allow_hyphen_values = true,
-            num_args = 0..=1
-        )]
-        args: Option<u32>,
-    },
-
-    ///Graphical music deck (requires terminal with image rendering)
-    #[command(visible_alias = "d")]
-    Display {
-        ///Show Scrolling lyrics if available
-        #[arg(short, long)]
-        lyrics: bool
-    },
-
-    //INTERNAL COMMANDS
-    #[command(hide = true)]
-    DisplaModeDaemon,
-    #[command(hide = true)]
-    GetNextTrackMeta,
-}   
+mod commands;
+use crate::commands::{Cli, Commands};
 
 #[derive(Deserialize)]
 pub struct Config {
@@ -271,7 +153,7 @@ fn main() {
                 Err(e) => eprintln!("Failed to create Tokio runtime: {}", e),
             }
         },
-        Commands::DisplaModeDaemon => {
+        Commands::DisplayModeDaemon => {
             println!("This is an internal daemon command and is not meant to be executed directly");
         }
         _=>{
