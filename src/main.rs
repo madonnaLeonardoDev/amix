@@ -1,9 +1,12 @@
+use std::fs;
 use std::os::unix::net::UnixStream;
 use std::io::{Write, Read};
 use std::net::Shutdown;
 use clap::{Parser, Subcommand};
+use image::EncodableLayout;
+use serde::{Deserialize};
 use wincode_derive::{SchemaRead, SchemaWrite};
-use crate::paths::{DAEMON_SOCKET_PATH};
+use crate::paths::{DAEMON_SOCKET_PATH, CONFIG_PATH};
 use crate::daemon::{DaemonResponse, kill_all, start_daemon};
 use crate::display_mode::run_player_loop;
 use wincode;
@@ -136,6 +139,47 @@ pub enum Commands {
     GetNextTrackMeta,
 }   
 
+#[derive(Deserialize)]
+pub struct Config {
+    //Browser Headless Settings
+    pub width: u32,
+    pub height: u32,
+    pub frame_rate: u32,
+    pub cosmetic_animations: bool
+}
+impl Config {
+    pub fn read_config() -> Result<Self, String> {
+        let file_b = fs::read(&*CONFIG_PATH)
+            .map_err(|e| format!("Failed reading config file: {}",e))?;
+
+        let config: Config = toml::from_slice(file_b.as_bytes())
+            .map_err(|e| format!("Invalid config: {}", e))?;
+
+        Ok(config)
+    }
+
+    pub fn init_config() -> Result<(), String> {
+        if !CONFIG_PATH.as_path().exists(){
+            let default_config = r#"
+            #HEADLESS BROWSER DAEMON CONFIG
+            width = 1
+            height = 1
+            frame_rate = 1
+            cosmetic_animations = false
+            "#;
+            if let Some(path) = CONFIG_PATH.parent() {
+                fs::create_dir_all(path)
+                    .map_err(|e| e.to_string())?;
+
+                fs::write(&*CONFIG_PATH, default_config)
+                    .map_err(|e| e.to_string())?;
+            }
+
+        }
+        Ok(())
+    }
+}
+
 fn cmd_to_daemon(cli: Cli) {
             let cmd_as_bytes= wincode::serialize(&cli.command).unwrap();
             let payload_len = cmd_as_bytes.len() as u32;
@@ -202,6 +246,9 @@ fn cmd_to_daemon(cli: Cli) {
 }
 
 fn main() {
+    if let Err(e) = Config::init_config() {
+        println!("{}", e);
+    }
     let cli = Cli::parse();
 
     match cli.command {

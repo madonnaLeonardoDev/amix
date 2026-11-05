@@ -2,11 +2,34 @@ use thirtyfour::prelude::*;
 use std::{path::Path, time::Duration, fs};
 use tokio::time::sleep;
 use std::process::{Command, Child, Stdio};
-use crate::paths::{BROWSER_PROFILE_PATH, GECKO_PID_PATH, BROWSER_PID_PATH};
+use crate::{Config, paths::{BROWSER_PID_PATH, BROWSER_PROFILE_PATH, GECKO_PID_PATH}};
 pub struct BrowserState {
     pub driver: WebDriver,
     pub geckodriver_process: Child,
 }
+fn inject_performance_user_prefs() -> Result<(), String>{
+    let config = Config::read_config()?;
+    let user_js_path = BROWSER_PROFILE_PATH.join("user.js");
+
+    // The mandatory starvation overrides
+    let hardening_prefs = format!(r#"
+// --- DYNAMIC DAEMON RESOURCE STARVATION OVERRIDES ---
+user_pref("layout.frame_rate", {});
+user_pref("toolkit.cosmeticAnimations.enabled", {});
+user_pref("layers.acceleration.disabled", true);
+user_pref("gfx.direct2d.disabled", true);
+user_pref("browser.sessionstore.resume_from_crash", false);
+user_pref("dom.ipc.processCount", 1);
+"#, config.frame_rate, config.cosmetic_animations);
+
+    // Append or overwrite the user.js inside the target profile
+    fs::write(user_js_path, hardening_prefs)
+        .map_err(|e| e.to_string())?;
+    
+    Ok(())
+}
+
+
 
 pub async fn init_browser(head: bool) -> Result<BrowserState, String> {
 let lock_file = BROWSER_PROFILE_PATH.join("lock");
@@ -60,15 +83,31 @@ if lock_file.exists() {
         .port();
     drop(temp_listener);
 
+    if !head {
+        inject_performance_user_prefs()?;
+    }
 
-    let geckodriver_process = Command::new("geckodriver")
+
+    let geckodriver_process = if head {
+        Command::new("geckodriver")
         .arg("--port")
         .arg(dynamic_port.to_string())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|e| format!("Failed to start geckodriver: {}", e))?;
-
+        .map_err(|e| format!("Failed to start geckodriver: {}", e))?
+    } else {
+        let config = Config::read_config()?;
+        Command::new("geckodriver")
+        .arg("--port")
+        .arg(dynamic_port.to_string())
+        .env("MOZ_HEADLESS_WIDTH", config.width.to_string())
+        .env("MOZ_HEADLESS_HEIGHT", config.height.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("Failed to start geckodriver: {}", e))?
+    };
     let child_pid = geckodriver_process.id();
     if let Err(e) = fs::write(&*GECKO_PID_PATH, child_pid.to_string()) {
         eprintln!("Failed to write gecko PID file: {}", e);

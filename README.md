@@ -19,8 +19,8 @@ A lightweight, high-performance Rust command-line client and daemon for Apple Mu
 * **Terminal Display Mode:** Real-time terminal interface rendering cover art (for supported terminal emulators like Kitty or Sixel) alongside synced, scrolling lyrics.
 * **LRCLIB Integration:** Synced lyrics fetched automatically from [lrclib.net](https://lrclib.net).
 * **Ultra-Low Resource Footprint:**
-  * **Rust TUI / CLI:** ~0% CPU usage and ~2% RAM on standard hardware (~32GB DDR4 / Ryzen 5 5600X).
-  * **Daemon Overhead:** Skips all UI rendering, using barely ~0.2% RAM (~65MB).
+  * **Rust TUI / CLI:** 0.6% CPU Single Thread usage and 0.3% RAM on standard hardware (32GB DDR4 / Ryzen 5 5600X).
+  * **Daemon Overhead:** Skips all UI rendering, using zero GPU and barely ~2-3% CPU Single Thread (Standard Firefox window uses 10-12% CPU + GPU Acceleration).
 * **Window Manager Friendly:** Designed to be effortlessly bound to keyboard shortcuts in `i3wm`, `sway`, `hyprland`, `bspwm`, or `xbindkeys`.
 * **Full Music Control:** Search, queue manipulation, volume adjustment, track navigation, and real-time playback monitoring.
 

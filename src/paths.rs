@@ -13,6 +13,16 @@ pub static BROWSER_PROFILE_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
 
     path
 });
+pub static CONFIG_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
+    let mut dir = std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("~/"))
+        .join(".config/amix");
+    std::fs::create_dir_all(&dir)
+        .expect("Failed to create config directory");
+    dir.push("config.toml");
+    dir
+});
 
 pub static DAEMON_ERR_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
     std::env::temp_dir().join("amix_daemon.err")
