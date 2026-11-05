@@ -29,6 +29,27 @@ user_pref("dom.ipc.processCount", 1);
     Ok(())
 }
 
+fn remove_performance_user_prefs() -> Result<(), String>{
+    let user_js_path = BROWSER_PROFILE_PATH.join("user.js");
+
+    // The mandatory starvation overrides
+    let hardening_prefs = r#"
+// --- DYNAMIC DAEMON RESOURCE STARVATION OVERRIDES ---
+user_pref("layout.frame_rate", 60);
+user_pref("toolkit.cosmeticAnimations.enabled", true);
+user_pref("layers.acceleration.disabled", false);
+user_pref("gfx.direct2d.disabled", false);
+user_pref("browser.sessionstore.resume_from_crash", true);
+user_pref("dom.ipc.processCount", 1);
+"#;
+
+    // Append or overwrite the user.js inside the target profile
+    fs::write(user_js_path, hardening_prefs)
+        .map_err(|e| e.to_string())?;
+    
+    Ok(())
+}
+
 
 
 pub async fn init_browser(head: bool) -> Result<BrowserState, String> {
@@ -83,7 +104,9 @@ if lock_file.exists() {
         .port();
     drop(temp_listener);
 
-    if !head {
+    if head {
+        remove_performance_user_prefs()?;
+    } else {
         inject_performance_user_prefs()?;
     }
 
