@@ -1,3 +1,5 @@
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use std::fs;
 use std::os::unix::net::UnixStream;
 use std::io::{Write, Read};
