@@ -41,6 +41,8 @@ pub struct LsQueueArgs {
 
 #[derive(Args, Debug, Clone)]
 pub struct LsPlaylistArgs {
+    #[command(flatten)]
+    pub target: PlayTarget,
     #[arg(short, long)]
     pub result: Option<u32>
 }
@@ -51,7 +53,9 @@ pub struct LsSearchArgs {
     #[arg(short, long)]
     pub result: Option<u32>,
     #[arg(short, long)]
-    pub library: Option<u32>,
+    pub library: bool,
+    #[arg(short = 't', long = "type")]
+    pub search_type: Option<MediaType>,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -72,12 +76,9 @@ pub struct LsCommand {
     pub search_args: LsSearchArgs,
 }
 
-#[derive(Subcommand, Debug, Clone)]
-pub enum RmQueue {
-    Queue{
-        #[arg(short, long)]
-        index: Option<u32>
-    }
+#[derive(Args, Debug, Clone)]
+pub struct RmQueue {
+    pub queue: u32,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -85,52 +86,33 @@ pub enum RmQueue {
     group = ArgGroup::new("track_target")
         .required(true)
         .multiple(false),
-
     group = ArgGroup::new("playlist_target")
         .required(true)
         .multiple(false),
 )]
 pub struct RmFromPlaylist {
-    // --- Track Slot ---
-    #[arg(
-        long = "track-id",
-        value_name = "TRACK_ID",
-        group = "track_target",
-        help = "Track ID"
-    )]
+    #[arg(long = "track-id", value_name = "TRACK_ID", group = "track_target", help = "Track ID")]
     pub track_id: Option<String>,
 
-    #[arg(
-        value_name = "TRACK_QUERY",
-        group = "track_target",
-        help = "Track name or query"
-    )]
+    #[arg(value_name = "TRACK_QUERY", group = "track_target", help = "Track name or query")]
     pub track_query: Option<String>,
 
-    // --- Playlist Slot ---
-    #[arg(
-        long = "playlist-id",
-        value_name = "PLAYLIST_ID",
-        group = "playlist_target",
-        help = "Playlist ID"
-    )]
+    #[arg(long = "playlist-id", value_name = "PLAYLIST_ID", group = "playlist_target", help = "Playlist ID")]
     pub playlist_id: Option<String>,
 
-    #[arg(
-        value_name = "PLAYLIST_QUERY",
-        group = "playlist_target",
-        help = "Playlist name or query"
-    )]
+    #[arg(value_name = "PLAYLIST_QUERY", group = "playlist_target", help = "Playlist name or query")]
     pub playlist_query: Option<String>,
 }
 
+/// The two mutually exclusive modes for the rm command
 #[derive(Args, Debug, Clone)]
+#[group(required = true, multiple = false)]
 pub struct RmCommand {
-    #[command(subcommand)]
-    pub subcommand: Option<RmQueue>,
+    #[command(flatten)]
+    pub queue_mode: Option<RmQueue>,
 
     #[command(flatten)]
-    pub search_args: RmFromPlaylist,
+    pub playlist_mode: Option<RmFromPlaylist>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -149,7 +131,7 @@ pub struct RmPlCommand{
         group = "playlist_target",
         help = "playlist name or query"
     )]
-    pub track_query: Option<String>,
+    pub playlist_query: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -315,7 +297,10 @@ pub enum PlayerCommand{
     SetQueue(SearchArgs),
     QueueNext(SearchArgs),
     QueueAdd(SearchArgs),
-    Search(SearchArgs),
+    Search{
+        search: SearchArgs,
+        result: Option<u32>
+    },
     ListPlaylistTracks{
         search: SearchArgs,
         result: Option<u32>
@@ -350,7 +335,7 @@ impl Commands {
                 let search_type = if let Some(t) = play_type.to_owned() {
                     vec![t]
                 } else {
-                    let t = Vec::new();
+                    let mut t = Vec::new();
                     t.push(MediaType::Song);
                     t.push(MediaType::Radio);
                     t.push(MediaType::Album);
@@ -358,12 +343,12 @@ impl Commands {
                     t
                 };
 
-                let t = target.unwrap();
+                let t = target.as_ref().unwrap();
 
-                let target:(String, bool)= if let Some(id) = t.id {
-                    (id, true)
+                let target:(String, bool)= if let Some(id) = &t.id {
+                    (id.to_string(), true)
                 } else {
-                    (t.query.unwrap(), false)
+                    (t.query.as_ref().unwrap().to_string(), false)
                 };
 
                 Ok(PlayerCommand::SetQueue(
@@ -378,7 +363,7 @@ impl Commands {
                 let search_type = if let Some(t) = play_type.to_owned() {
                     vec![t]
                 } else {
-                    let t = Vec::new();
+                    let mut t = Vec::new();
                     t.push(MediaType::Song);
                     t.push(MediaType::Radio);
                     t.push(MediaType::Album);
@@ -386,12 +371,12 @@ impl Commands {
                     t
                 };
 
-                let t = target.unwrap();
+                let t = target.as_ref().unwrap();
 
-                let target:(String, bool)= if let Some(id) = t.id {
-                    (id, true)
+                let target:(String, bool)= if let Some(id) = t.id.as_ref() {
+                    (id.to_string(), true)
                 } else {
-                    (t.query.unwrap(), false)
+                    (t.query.as_ref().unwrap().to_string(), false)
                 };
                 if *next {
                     return Ok(PlayerCommand::QueueNext(
@@ -404,13 +389,199 @@ impl Commands {
             },
 
             Commands::Ls(command) => {
-                if command.subcommand.is_some(){
-                    //LS SUBCOMMANDS MATCHING                    
-                } else {
-                    //SEARCH
-                }
+                if let Some(subcommand) = command.subcommand.clone() {
+                    match subcommand {
+                        LsSubcommands::Playlist(pl_args) => {
+                            let result = pl_args.result;
+                            let (target, is_target_id) = match (pl_args.target.query, pl_args.target.id) {
+                                (Some(q), None) => (q, false),
+                                (None, Some(id)) => (id, true),
+                                (Some(_), Some(_)) => return Err("Either query or id".to_string()),
+                                (None, None) => return Err("Pick a target either by query or id (--id)".to_string())
+                            };
 
-                Ok(())
+                            return Ok(PlayerCommand::ListPlaylistTracks { search: SearchArgs { target, is_target_id, search_type: vec![MediaType::Playlist], is_target_library: true }, result });
+                        }
+                        LsSubcommands::Queue(queue_args) => {
+                           return Ok(PlayerCommand::ListQueueTracks(queue_args.result))
+                        }
+                    }
+
+
+
+                } else {
+                    let query = command.search_args.query.clone();
+                    let result = command.search_args.result;
+                    let is_library = command.search_args.library;
+                    let search_type = if let Some(t) = command.search_args.search_type {
+                        vec![t]
+                    } else {
+                        let mut t = Vec::new();
+                        t.push(MediaType::Album);
+                        t.push(MediaType::Song);
+                        t.push(MediaType::Radio);
+                        t.push(MediaType::Playlist);
+                        t
+                    };
+
+                    return Ok(PlayerCommand::Search { search: SearchArgs { target: query, is_target_id: false, search_type, is_target_library: is_library }, result })
+                }
+            }
+
+            Commands::Rm(command) => {
+                match (command.playlist_mode.clone(), command.queue_mode.clone()) {
+                    (Some(rm_from_pl), None) => {
+                        let track_target_search: (String, bool) = match (rm_from_pl.track_query.as_ref(), rm_from_pl.track_query.as_ref()) {
+                          (Some(q), None) => {
+                            (q.to_string(), false)
+                          },
+                          (None, Some(id)) => {
+                            (id.to_string(), true)
+                          },
+                          (Some(_), Some(_)) => {
+                            return Err("Either query or id".to_string())  
+                          } ,
+                          (None, None) =>{
+                            return Err("Either query or id".to_string())
+                          }
+                        };
+
+                        let playlist_target_search: (String, bool) = match (rm_from_pl.playlist_query, rm_from_pl.playlist_id) {
+                          (Some(q), None) => {
+                            (q, false)
+                          },
+                          (None, Some(id)) => {
+                            (id, true)
+                          },
+                          (Some(_), Some(_)) => {
+                            return Err("Either query or id".to_string())  
+                          } ,
+                          (None, None) =>{
+                            return Err("Either query or id".to_string())
+                          }
+                        };
+
+
+
+                        return Ok(PlayerCommand::RmFromPlaylist { track_target_search: SearchArgs {
+                                target: track_target_search.0, is_target_id: track_target_search.1, search_type: vec![MediaType::Song], is_target_library: true }, 
+
+                             playlist_target_search: SearchArgs {
+                                target: playlist_target_search.0, is_target_id: playlist_target_search.1, search_type: vec![MediaType::Playlist], is_target_library: true } })
+                    },
+                    (None, Some(rmq)) => {
+                        return Ok(PlayerCommand::RmQueue(Some(rmq.queue)));
+                    },
+                    (None, None) => {
+                        return Ok(PlayerCommand::RmQueue(None));
+                    },
+                    (Some(_), Some(_)) => {
+                        return Err("Either rm queue or rm from pl".to_string())
+                    }
+                }
+            }
+
+            Commands::Rmpl(command) => {
+                        let (target, is_id): (String, bool) = match (command.playlist_query.as_ref(), command.playlist_id.as_ref()) {
+                          (Some(q), None) => {
+                            (q.to_string(), false)
+                          },
+                          (None, Some(id)) => {
+                            (id.to_string(), true)
+                          },
+                          (Some(_), Some(_)) => {
+                            return Err("Either query or id".to_string())  
+                          } ,
+                          (None, None) =>{
+                            return Err("Either query or id".to_string())
+                          }
+                        };
+                        return Ok(PlayerCommand::RmPlaylist(SearchArgs 
+                            { target: target, is_target_id: is_id, search_type: vec![MediaType::Playlist], is_target_library: true }));
+            }
+
+            Commands::Mkpl(command) => {
+                return Ok(PlayerCommand::MkPlaylist(command.playlist_name.clone()))
+            }
+
+            Commands::Mv(command) => {
+                let (track_target, is_track_target_id, is_track_target_current): (Option<String>, bool, bool) = 
+                    match (command.track_query.as_ref(), command.track_id.as_ref()) {
+                        (Some(q), None) => {
+                            if command.current {
+                                return Err("Either current track or query".to_string());
+                            }
+                            (Some(q.to_string()), false, false)
+                        },
+                        (None, Some(id)) => {
+                            if command.current {
+                                return Err("Either current track or id".to_string());
+                            }
+                            (Some(id.to_string()), true, false)
+                        },
+                        (None, None) => {
+                            if !command.current {
+                                return Err("Either current track or query/id".to_string());
+                            }
+                            (None, false, true)
+                        },
+                        (Some(_), Some(_)) => {
+                            return Err("Either query or id or current".to_string())
+                        }
+                    };
+
+                let (playlist_target, is_playlist_target_id, is_playlist_target_fav): (Option<String>, bool, bool) =
+                match (command.playlist_query.as_ref(), command.playlist_id.as_ref()) {
+                        (Some(q), None) => {
+                            if command.fav {
+                                return Err("Either fav playlist or query".to_string());
+                            }
+                            (Some(q.to_string()), false, false)
+                        },
+                        (None, Some(id)) => {
+                            if command.fav {
+                                return Err("Either fav playlist or id".to_string());
+                            }
+                            (Some(id.to_string()), true, false)
+                        },
+                        (None, None) => {
+                            if !command.fav {
+                                return Err("Either fav playlist or query/id".to_string());
+                            }
+                            (None, false, true)
+                        },
+                        (Some(_), Some(_)) => {
+                            return Err("Either query or id or fav".to_string())
+                        }
+                };
+
+                let track_sc =  if let Some(target) = track_target {
+                    Some(SearchArgs { target, is_target_id: is_track_target_id, search_type: vec![MediaType::Song], is_target_library: false })
+                } else {
+                    None
+                };
+                let playlist_sc =  if let Some(target) = playlist_target {
+                    Some(SearchArgs { target, is_target_id: is_playlist_target_id, search_type: vec![MediaType::Playlist], is_target_library: true })
+                } else {
+                    None
+                };
+                return  Ok(PlayerCommand::MvToPlaylist { track_target: track_sc , is_track_target_current, playlist_target: playlist_sc, is_playlist_target_fav })
+            }
+        
+            Commands::Volume { value } => {
+                return Ok(PlayerCommand::Volume(*value))
+            }
+
+            Commands::Autoplay => {
+                return Ok(PlayerCommand::AutoPlayToggle)
+            }
+
+            Commands::Shuffle => {
+                return Ok(PlayerCommand::ShuffleToggle)
+            }
+            
+            _=> {
+                return Err("Command not supported".to_string())
             }
         }
     }
