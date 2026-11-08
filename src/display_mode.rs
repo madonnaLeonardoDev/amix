@@ -1,9 +1,9 @@
+use crate::commands::PlayerCommand;
 use crate::daemon::DaemonResponse;
 use reqwest;
 use tokio_util::sync::CancellationToken;
 use tokio::sync::{mpsc};
 use std::os::unix::io::AsRawFd;
-use crate::Commands;
 use crate::lyrics::{LyricLine, get_current_lyrics, request_lyric};
 use crate::browser_interface::{Track};
 use crate::paths::DAEMON_SOCKET_PATH;
@@ -120,7 +120,7 @@ async fn load_next() -> Result<Option<Self>, String> {
         let mut s = UnixStream::connect(DAEMON_SOCKET_PATH.as_path()).await
             .map_err(|e| format!("Daemon connection failed: {}", e))?;
 
-        let request = wincode::serialize(&Commands::GetNextTrackMeta)
+        let request = wincode::serialize(&PlayerCommand::GetNextTrackMeta)
             .map_err(|e| format!("Failed serializing internal Command: {}", e))?;
         let len_prefix = (request.len() as u32).to_le_bytes();
 
@@ -299,7 +299,7 @@ pub async fn run_player_loop(lyrics_enabled: bool) -> Result<(), String> {
         }
     };
     //Start Persistent Connection
-    let request = wincode::serialize(&Commands::DisplaModeDaemon)
+    let request = wincode::serialize(&PlayerCommand::DisplaModeDaemon)
             .map_err(|e| format!("Failed serializing internal Command: {}", e))?;
         let len_prefix = (request.len() as u32).to_le_bytes();
 

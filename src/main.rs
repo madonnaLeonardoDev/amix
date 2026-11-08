@@ -4,6 +4,7 @@ use std::fs;
 use std::os::unix::net::UnixStream;
 use std::io::{Write, Read};
 use std::net::Shutdown;
+use clap::Parser;
 use image::EncodableLayout;
 use serde::{Deserialize};
 
@@ -65,7 +66,14 @@ impl Config {
 }
 
 fn cmd_to_daemon(cli: Cli) {
-            let cmd_as_bytes= wincode::serialize(&cli.command).unwrap();
+            let player_cmd = match cli.command.into_player_cmd(){
+                Err(e) => {
+                    eprint!("{}", e);
+                    return;
+                }
+                Ok(c) => c
+            };
+            let cmd_as_bytes= wincode::serialize(&player_cmd).unwrap();
             let payload_len = cmd_as_bytes.len() as u32;
             match UnixStream::connect(DAEMON_SOCKET_PATH.as_path()) {
                 Ok(mut stream) => {
@@ -135,6 +143,8 @@ fn main() {
     }
     let cli = Cli::parse();
 
+    eprintln!("PARSED COMMAND: {:?}", cli);
+
     match cli.command {
         Commands::Killd => {
             println!("{}",kill_all().unwrap());
@@ -155,9 +165,6 @@ fn main() {
                 Err(e) => eprintln!("Failed to create Tokio runtime: {}", e),
             }
         },
-        Commands::DisplayModeDaemon => {
-            println!("This is an internal daemon command and is not meant to be executed directly");
-        }
         _=>{
             cmd_to_daemon(cli);
         },

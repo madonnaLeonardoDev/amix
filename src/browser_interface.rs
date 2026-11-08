@@ -1,5 +1,5 @@
 use std::vec;
-use crate::daemon_controls::format_time;
+use crate::{commands::MediaType, daemon_controls::format_time};
 use thirtyfour::prelude::*;
 use serde::{Serialize, Deserialize};
 use wincode_derive::{SchemaRead, SchemaWrite};
@@ -83,19 +83,19 @@ impl Album {
     }
 }
 
-pub enum ItemType {
-    Song,
-    Playlist,
-    Album
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Artist {
+    pub id: Option<String>,
+    pub name: Option<String>,
 }
 
-impl ItemType {
-    fn as_str(&self) -> &'static str {
-        match self {
-            ItemType::Album => "albums",
-            ItemType::Playlist => "playlists",
-            ItemType::Song => "songs"
-        }
+impl Artist {
+    pub fn pretty_display(&self) -> String {
+        format!(
+            "{}(id: {})",
+            self.name.clone().unwrap_or_else(|| "Unknown Name".to_string()),
+            self.id.clone().unwrap_or_else(|| "Unknown ID".to_string())
+        )
     }
 }
 
@@ -104,12 +104,14 @@ impl ItemType {
 pub enum SearchResult {
     Track(Track),
     Album(Album),
-    Playlist(Playlist)
+    Playlist(Playlist),
+    Artist(Artist)
 }
 
 pub trait MusicDriver {
-    async fn search(&self, query: &str, item_type: &ItemType, is_library: bool) -> Result<SearchResult, String>; 
-    async fn play_next(&self, item_type: &ItemType, id: &str) -> Result<String, String>;
+    async fn search(&self, query: &str, item_type: Vec<MediaType>, is_library: bool, limit: u32) -> Result<SearchResult, String>; 
+    async fn play_next(&self, item_type: &MediaType, id: &str) -> Result<String, String>;
+    async fn set_queue(&self, item_type: &MediaType, id: &str) -> Result<String, String>;
     async fn play(&self) -> Result<(), String>; 
     async fn pause(&self) -> Result<(), String>; 
     async fn next_track(&self) -> Result<(), String>; 
@@ -118,12 +120,26 @@ pub trait MusicDriver {
     async fn list_library_playlists(&self) -> Result<Vec<Playlist>, String>; 
     async fn get_current_track(&self) -> Result<Option<Track>, String>; 
     async fn clear_queue(&self) -> Result<(), String>; 
+    async fn remove_queue(&self, index: u32) -> Result<(), String>;
     async fn list_queue(&self) -> Result<Vec<Track>, String>;
     async fn volume(&self, val: Option<u32>) -> Result<i32, String>;
 }
 
 impl MusicDriver for WebDriver {
-    async fn search(&self, query: &str, item_type: &ItemType, is_library: bool) -> Result<SearchResult, String> {
+ async fn search(&self, query: &str, item_type: Vec<MediaType>, is_library: bool, limit: u32) -> Result<SearchResult, String> {
+    let mut media_type_string = String::new();
+    let mut types_json_array = String::from("[");
+    
+    for (i, item) in item_type.iter().enumerate() {
+        if i > 0 {
+            media_type_string.push_str(",");
+            types_json_array.push_str(",");
+        }
+        media_type_string.push_str(item.as_str());
+        types_json_array.push_str(&format!("\"{}\"", item.as_str()));
+    }
+    types_json_array.push_str("]");
+
     let script: String = if is_library {
         format!(
             r#"
@@ -137,39 +153,51 @@ impl MusicDriver for WebDriver {
                     const searchResponse = await mk.api.music(`v1/me/library/search`, {{
                         term: "{}",
                         types: "library-{}",
-                        limit: 1
+                        limit: {}
                     }});
 
-                    // Key in library responses is 'library-songs', 'library-albums', etc.
-                    const data = searchResponse?.data?.results?.["library-{}"]?.data?.[0];
-                    if (!data) return null;
+                    const resultsObj = searchResponse?.data?.results || {{}};
+                    const requestedTypes = {};
 
-                    const attr = data?.attributes || {{}};
+                    for (const rawType of requestedTypes) {{
+                        const key = `library-${{rawType}}`;
+                        const items = resultsObj[key]?.data;
+                        if (items && items.length > 0) {{
+                            const data = items[0];
+                            const attr = data?.attributes || {{}};
 
-                    if ("{}" === "songs") {{
-                        return {{
-                            type: "Track",
-                            id: data.id || null,
-                            title: attr.name || null,
-                            artist: attr.artistName || null,
-                            album: attr.albumName || null,
-                            duration_ms: attr.durationInMillis || null
-                        }};
-                    }} else if ("{}" === "albums") {{
-                        return {{
-                            type: "Album",
-                            id: data.id || null,
-                            name: attr.name || null,
-                            artist: attr.artistName || null,
-                            track_count: attr.trackCount || null
-                        }};
-                    }} else if ("{}" === "playlists") {{
-                        return {{
-                            type: "Playlist",
-                            id: data.id || null,
-                            name: attr.name || null,
-                            desc: attr.description?.standard || null
-                        }};
+                            if (rawType === "songs") {{
+                                return {{
+                                    type: "Track",
+                                    id: data.id || null,
+                                    title: attr.name || null,
+                                    artist: attr.artistName || null,
+                                    album: attr.albumName || null,
+                                    duration_ms: attr.durationInMillis || null
+                                }};
+                            }} else if (rawType === "albums") {{
+                                return {{
+                                    type: "Album",
+                                    id: data.id || null,
+                                    name: attr.name || null,
+                                    artist: attr.artistName || null,
+                                    track_count: attr.trackCount || null
+                                }};
+                            }} else if (rawType === "playlists") {{
+                                return {{
+                                    type: "Playlist",
+                                    id: data.id || null,
+                                    name: attr.name || null,
+                                    desc: attr.description?.standard || null
+                                }};
+                            }} else if (rawType === "artists") {{
+                                return {{
+                                    type: "Artist",
+                                    id: data.id || null,
+                                    name: attr.name || null
+                                }};
+                            }}
+                        }}
                     }}
 
                     return null;
@@ -180,11 +208,9 @@ impl MusicDriver for WebDriver {
             }})();
             "#,
             query,
-            item_type.as_str(),
-            item_type.as_str(), // Fixed key prefix for library search
-            item_type.as_str(),
-            item_type.as_str(),
-            item_type.as_str(),
+            media_type_string,
+            limit,
+            types_json_array,
         )
     } else {
         format!(
@@ -201,38 +227,50 @@ impl MusicDriver for WebDriver {
                     const searchResponse = await mk.api.music(`v1/catalog/${{storefront}}/search`, {{
                         term: "{}",
                         types: "{}",
-                        limit: 1
+                        limit: {}
                     }});
 
-                    const data = searchResponse?.data?.results?.{}?.data?.[0];
-                    if (!data) return null;
+                    const resultsObj = searchResponse?.data?.results || {{}};
+                    const requestedTypes = {};
 
-                    const attr = data?.attributes || {{}};
+                    for (const rawType of requestedTypes) {{
+                        const items = resultsObj[rawType]?.data;
+                        if (items && items.length > 0) {{
+                            const data = items[0];
+                            const attr = data?.attributes || {{}};
 
-                    if ("{}" === "songs") {{
-                        return {{
-                            type: "Track",
-                            id: data.id || null,
-                            title: attr.name || null,
-                            artist: attr.artistName || null,
-                            album: attr.albumName || null,
-                            duration_ms: attr.durationInMillis || null
-                        }};
-                    }} else if ("{}" === "albums") {{
-                        return {{
-                            type: "Album",
-                            id: data.id || null,
-                            name: attr.name || null,
-                            artist: attr.artistName || null,
-                            track_count: attr.trackCount || null
-                        }};
-                    }} else if ("{}" === "playlists") {{
-                        return {{
-                            type: "Playlist",
-                            id: data.id || null,
-                            name: attr.name || null,
-                            desc: attr.description?.standard || null
-                        }};
+                            if (rawType === "songs") {{
+                                return {{
+                                    type: "Track",
+                                    id: data.id || null,
+                                    title: attr.name || null,
+                                    artist: attr.artistName || null,
+                                    album: attr.albumName || null,
+                                    duration_ms: attr.durationInMillis || null
+                                }};
+                            }} else if (rawType === "albums") {{
+                                return {{
+                                    type: "Album",
+                                    id: data.id || null,
+                                    name: attr.name || null,
+                                    artist: attr.artistName || null,
+                                    track_count: attr.trackCount || null
+                                }};
+                            }} else if (rawType === "playlists") {{
+                                return {{
+                                    type: "Playlist",
+                                    id: data.id || null,
+                                    name: attr.name || null,
+                                    desc: attr.description?.standard || null
+                                }};
+                            }} else if (rawType === "artists") {{
+                                return {{
+                                    type: "Artist",
+                                    id: data.id || null,
+                                    name: attr.name || null
+                                }};
+                            }}
+                        }}
                     }}
 
                     return null;
@@ -243,11 +281,9 @@ impl MusicDriver for WebDriver {
             }})();
             "#,
             query,
-            item_type.as_str(),
-            item_type.as_str(),
-            item_type.as_str(),
-            item_type.as_str(),
-            item_type.as_str(),
+            media_type_string,
+            limit,
+            types_json_array,
         )
     };
 
@@ -258,8 +294,8 @@ impl MusicDriver for WebDriver {
         .map_err(|e| format!("Deserialization error: {}", e))?;
 
     search_result.ok_or_else(|| "No Matches Found".to_string())
-    }
-    async fn play_next(&self, item_type: &ItemType, id: &str) -> Result<String, String> {
+}
+    async fn play_next(&self, item_type: &MediaType, id: &str) -> Result<String, String> {
     let script = format!(r#"
     return (async () => {{
         const mk = MusicKit.getInstance();
@@ -288,6 +324,37 @@ impl MusicDriver for WebDriver {
     }
 
     Err("Could Not play next, maybe wrong id".to_string())
+        
+    }
+    async fn set_queue(&self, item_type: &MediaType, id: &str) -> Result<String, String> {
+    let script = format!(r#"
+    return (async () => {{
+        const mk = MusicKit.getInstance();
+        if (!mk || !mk.isAuthorized ) {{
+        await mk?.authorize();
+    }}
+    try {{ 
+    await mk.setQueue({{ {}: '{}'}});
+    return true;
+    }}
+    catch (e) {{
+        return false;
+    }}
+    }})()
+    "#, item_type.as_str(), id);
+
+    let res = self.execute(script, vec![]).await
+        .map_err(|e| e.to_string())?;
+
+
+    let is_success: bool = serde_json::from_value(res.json().clone())
+        .map_err(|e| e.to_string())?;
+
+    if is_success {
+        return Ok(id.to_string())
+    }
+
+    Err("Could Not play, maybe wrong id".to_string())
         
     }
     async fn play(&self) -> Result<(), String> {
@@ -409,6 +476,14 @@ return (() => {
     MusicKit.getInstance().clearQueue()
     "#;
 
+    self.execute(script, vec![]).await.map_err(|e| e.to_string())?;
+    
+    Ok(())
+}
+    async fn remove_queue(&self, index: u32) -> Result<(), String> {
+    let script = format!(r#"
+    MusicKit.getInstance().queue.remove({})
+    "#, index);
     self.execute(script, vec![]).await.map_err(|e| e.to_string())?;
     
     Ok(())
