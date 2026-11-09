@@ -241,6 +241,12 @@ pub enum Commands {
     #[command()]
     Current,
 
+    #[command(visible_alias = "nx")]
+    Next,
+
+    #[command(visible_alias = "pv")]
+    Previous,
+
     #[command()]
     Volume{
         value: Option<u32>,
@@ -312,22 +318,19 @@ impl Commands {
     pub fn into_player_cmd(&self) -> Result<PlayerCommand, String> {
         match self {
             Commands::Play { target, play_type, library } => {
-                eprint!("DEBUG: {:?}", self);
                 if target.is_none(){
-                    eprint!("TAEGET IS NONE");
                     return Ok(PlayerCommand::PlayStop)
                 }
                 let search_type = if let Some(t) = play_type.to_owned() {
                     vec![t]
                 } else {
                     let mut t = Vec::new();
-                    t.push(MediaType::Song);
                     t.push(MediaType::Artist);
+                    t.push(MediaType::Song);
                     t.push(MediaType::Album);
                     t.push(MediaType::Playlist);
                     t
                 };
-                eprint!("SetQueue sent");
                 Ok(PlayerCommand::SetQueue(
                     SearchArgs { target: target.clone().unwrap(), search_type: search_type, is_target_library: *library, limit: None }
                 ))
@@ -485,6 +488,12 @@ impl Commands {
             },
             Commands::Current => {
                 return Ok(PlayerCommand::Current);
+            },
+            Commands::Next => {
+                return Ok(PlayerCommand::NextTrack);
+            },
+            Commands::Previous => {
+                return Ok(PlayerCommand::PrevTrack)
             }
             
             _=> {

@@ -142,9 +142,6 @@ fn main() {
         println!("{}", e);
     }
     let cli = Cli::parse();
-
-    eprintln!("PARSED COMMAND: {:?}", cli);
-
     match cli.command {
         Commands::Killd => {
             println!("{}",kill_all().unwrap());

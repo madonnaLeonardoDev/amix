@@ -2,6 +2,7 @@ use std::vec;
 use crate::{commands::MediaType, daemon_controls::format_time};
 use thirtyfour::prelude::*;
 use serde::{Serialize, Deserialize};
+use tokio_util::bytes::buf::Limit;
 use wincode_derive::{SchemaRead, SchemaWrite};
 
 #[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite, PartialEq, Clone)]
@@ -111,7 +112,7 @@ pub enum SearchResult {
 pub trait MusicDriver {
     async fn search(&self, query: &str, item_type: Vec<MediaType>, is_library: bool, limit: u32) -> Result<SearchResult, String>; 
     async fn play_next(&self, item_type: &MediaType, id: &str) -> Result<String, String>;
-    async fn set_queue(&self, item_type: &MediaType, id: &str) -> Result<String, String>;
+    async fn set_queue(&self, item_type: &MediaType, id: &str, is_library: bool) -> Result<String, String>;
     async fn play(&self) -> Result<(), String>; 
     async fn pause(&self) -> Result<(), String>; 
     async fn next_track(&self) -> Result<(), String>; 
@@ -126,166 +127,109 @@ pub trait MusicDriver {
 }
 
 impl MusicDriver for WebDriver {
- async fn search(&self, query: &str, item_type: Vec<MediaType>, is_library: bool, limit: u32) -> Result<SearchResult, String> {
-    let mut media_type_string = String::new();
-    let mut types_json_array = String::from("[");
-    
-    for (i, item) in item_type.iter().enumerate() {
-        if i > 0 {
-            media_type_string.push_str(",");
-            types_json_array.push_str(",");
-        }
-        media_type_string.push_str(item.as_str());
-        types_json_array.push_str(&format!("\"{}\"", item.as_str()));
-    }
-    types_json_array.push_str("]");
+    //WORKING
+async fn search(&self, term: &str, item_types: Vec<MediaType>, is_library: bool, limit: u32) -> Result<SearchResult, String> {
+    let types_param = item_types
+        .iter()
+        .map(|t| {
+            if is_library {
+                format!("library-{}", t.as_str())
+            } else {
+                t.as_str().to_string()
+            }
+        })
+        .collect::<Vec<String>>()
+        .join(",");
 
-    let script: String = if is_library {
-        format!(
-            r#"
-            return (async () => {{
-                try {{
-                    const mk = MusicKit.getInstance();
-                    if (!mk || !mk.isAuthorized) {{
-                        await mk?.authorize();
-                    }}
-
-                    const searchResponse = await mk.api.music(`v1/me/library/search`, {{
-                        term: "{}",
-                        types: "library-{}",
-                        limit: {}
-                    }});
-
-                    const resultsObj = searchResponse?.data?.results || {{}};
-                    const requestedTypes = {};
-
-                    for (const rawType of requestedTypes) {{
-                        const key = `library-${{rawType}}`;
-                        const items = resultsObj[key]?.data;
-                        if (items && items.length > 0) {{
-                            const data = items[0];
-                            const attr = data?.attributes || {{}};
-
-                            if (rawType === "songs") {{
-                                return {{
-                                    type: "Track",
-                                    id: data.id || null,
-                                    title: attr.name || null,
-                                    artist: attr.artistName || null,
-                                    album: attr.albumName || null,
-                                    duration_ms: attr.durationInMillis || null
-                                }};
-                            }} else if (rawType === "albums") {{
-                                return {{
-                                    type: "Album",
-                                    id: data.id || null,
-                                    name: attr.name || null,
-                                    artist: attr.artistName || null,
-                                    track_count: attr.trackCount || null
-                                }};
-                            }} else if (rawType === "playlists") {{
-                                return {{
-                                    type: "Playlist",
-                                    id: data.id || null,
-                                    name: attr.name || null,
-                                    desc: attr.description?.standard || null
-                                }};
-                            }} else if (rawType === "artists") {{
-                                return {{
-                                    type: "Artist",
-                                    id: data.id || null,
-                                    name: attr.name || null
-                                }};
-                            }}
-                        }}
-                    }}
-
-                    return null;
-                }} catch (err) {{
-                    console.error("Library Search Error:", err);
-                    return null;
+    let script = format!(r#"
+    return (async () => {{
+        try {{
+            const mk = MusicKit.getInstance();
+            if (!mk || !mk.isAuthorized) {{
+                await mk?.authorize();
+            }}
+            
+            const storefront = mk.storefrontId || 'it';
+            const isLib = {};
+            const term = "{}";
+            const typesParam = "{}";
+            const limit = {};
+            
+            const endpoint = isLib 
+                ? "v1/me/library/search" 
+                : `v1/catalog/${{storefront}}/search`;
+            
+            const response = await mk.api.music(endpoint, {{
+                term: term,
+                types: typesParam,
+                limit: 1
+            }});
+            
+            const results = response?.data?.results;
+            if (!results) return null;
+            
+            let rawItem = null;
+            for (const key of Object.keys(results)) {{
+                const items = results[key]?.data;
+                if (items && items.length > 0) {{
+                    rawItem = items[0];
+                    break;
                 }}
-            }})();
-            "#,
-            query,
-            media_type_string,
-            limit,
-            types_json_array,
-        )
-    } else {
-        format!(
-            r#"
-            return (async () => {{
-                try {{
-                    const mk = MusicKit.getInstance();
-                    if (!mk || !mk.isAuthorized) {{
-                        await mk?.authorize();
-                    }}
-
-                    const storefront = mk.storefrontId || mk.storefront || 'us';
-
-                    const searchResponse = await mk.api.music(`v1/catalog/${{storefront}}/search`, {{
-                        term: "{}",
-                        types: "{}",
-                        limit: {}
-                    }});
-
-                    const resultsObj = searchResponse?.data?.results || {{}};
-                    const requestedTypes = {};
-
-                    for (const rawType of requestedTypes) {{
-                        const items = resultsObj[rawType]?.data;
-                        if (items && items.length > 0) {{
-                            const data = items[0];
-                            const attr = data?.attributes || {{}};
-
-                            if (rawType === "songs") {{
-                                return {{
-                                    type: "Track",
-                                    id: data.id || null,
-                                    title: attr.name || null,
-                                    artist: attr.artistName || null,
-                                    album: attr.albumName || null,
-                                    duration_ms: attr.durationInMillis || null
-                                }};
-                            }} else if (rawType === "albums") {{
-                                return {{
-                                    type: "Album",
-                                    id: data.id || null,
-                                    name: attr.name || null,
-                                    artist: attr.artistName || null,
-                                    track_count: attr.trackCount || null
-                                }};
-                            }} else if (rawType === "playlists") {{
-                                return {{
-                                    type: "Playlist",
-                                    id: data.id || null,
-                                    name: attr.name || null,
-                                    desc: attr.description?.standard || null
-                                }};
-                            }} else if (rawType === "artists") {{
-                                return {{
-                                    type: "Artist",
-                                    id: data.id || null,
-                                    name: attr.name || null
-                                }};
-                            }}
-                        }}
-                    }}
-
-                    return null;
-                }} catch (err) {{
-                    console.error("Catalog Search Error:", err);
-                    return null;
-                }}
-            }})();
-            "#,
-            query,
-            media_type_string,
-            limit,
-            types_json_array,
-        )
-    };
+            }}
+            
+            if (!rawItem) return null;
+            
+            const typeStr = rawItem.type || "";
+            const attrs = rawItem.attributes || {{}};
+            
+            // Map Apple Music JSON:API structure to match Rust's #[serde(tag = "type")] enum
+            if (typeStr.includes("songs")) {{
+                return {{
+                    type: "Track",
+                    id: rawItem.id,
+                    title: attrs.name || null,
+                    artist: attrs.artistName || null,
+                    album: attrs.albumName || null,
+                    duration_ms: attrs.durationInMillis || null,
+                    current_ms: null,
+                    artwork: attrs.artwork || null
+                }};
+            }} else if (typeStr.includes("albums")) {{
+                return {{
+                    type: "Album",
+                    id: rawItem.id,
+                    name: attrs.name || null,
+                    artist: attrs.artistName || null,
+                    track_count: attrs.trackCount || null
+                }};
+            }} else if (typeStr.includes("playlists")) {{
+                const descVal = attrs.description;
+                const desc = typeof descVal === 'object' ? descVal?.standard : (descVal || null);
+                return {{
+                    type: "Playlist",
+                    id: rawItem.id,
+                    name: attrs.name || null,
+                    desc: desc
+                }};
+            }} else if (typeStr.includes("artists")) {{
+                return {{
+                    type: "Artist",
+                    id: rawItem.id,
+                    name: attrs.name || null
+                }};
+            }}
+            
+            return null;
+        }} catch(e) {{
+            return null;
+        }}
+    }})();
+    "#, 
+    if is_library { "true" } else { "false" },
+    term,
+    types_param,
+    limit
+    );
 
     let res = self.execute(script, vec![]).await
         .map_err(|e| e.to_string())?;
@@ -295,6 +239,7 @@ impl MusicDriver for WebDriver {
 
     search_result.ok_or_else(|| "No Matches Found".to_string())
 }
+
     async fn play_next(&self, item_type: &MediaType, id: &str) -> Result<String, String> {
     let script = format!(r#"
     return (async () => {{
@@ -326,57 +271,132 @@ impl MusicDriver for WebDriver {
     Err("Could Not play next, maybe wrong id".to_string())
         
     }
-    async fn set_queue(&self, item_type: &MediaType, id: &str) -> Result<String, String> {
+
+    //Works Only for Songs
+async fn set_queue(&self, item_type: &MediaType, id: &str, is_library: bool) -> Result<String, String> {
+    let singular_key = match item_type {
+        MediaType::Album => "album",
+        MediaType::Playlist => "playlist",
+        MediaType::Artist => "artist",
+        MediaType::Song => "song",
+    };
+
+    let key = if is_library {
+        format!("library-{}", item_type.as_str())
+    } else {
+        singular_key.to_string()
+    };
+
     let script = format!(r#"
+    const key = "{}";
+    const id = "{}";
+    console.log(key);
+    console.log(id);
+
     return (async () => {{
-        const mk = MusicKit.getInstance();
-        if (!mk || !mk.isAuthorized ) {{
-        await mk?.authorize();
-    }}
-    try {{ 
-    await mk.setQueue({{ {}: '{}'}});
-    return true;
-    }}
-    catch (e) {{
-        return false;
-    }}
-    }})()
-    "#, item_type.as_str(), id);
+        try {{
+            const mk = MusicKit.getInstance();
+            if (!mk || !mk.isAuthorized) {{
+                await mk?.authorize();
+            }}
+
+            const storefront = mk.storefrontId || 'us';
+
+            // Artists are metadata containers and cannot be played directly via shorthand.
+            // We fetch their top songs or related tracks and populate the queue items instead.
+            if (key === "artist") {{
+                const res = await mk.api.music(`v1/catalog/${{storefront}}/artists/${{id}}/songs`);
+                const tracks = res?.data?.data;
+                if (!tracks || tracks.length === 0) {{
+                    throw new Error("No playable tracks found for artist ID: " + id);
+                }}
+                await mk.setQueue({{ items: tracks }});
+                return {{ success: true }};
+            }} else if (key === "library-artists") {{
+                // Resolve library artist to catalog ID if available, or fetch top songs / library tracks
+                const res = await mk.api.music(`v1/me/library/artists/${{id}}`);
+                const resource = res?.data?.data?.[0];
+                const catalogId = resource?.relationships?.catalog?.data?.[0]?.id;
+                
+                let tracks = [];
+                if (catalogId) {{
+                    const topRes = await mk.api.music(`v1/catalog/${{storefront}}/artists/${{catalogId}}/songs`);
+                    tracks = topRes?.data?.data;
+                }}
+                
+                if (!tracks || tracks.length === 0) {{
+                    const songsRes = await mk.api.music(`v1/me/library/songs`, {{ limit: 25 }});
+                    tracks = songsRes?.data?.data || [];
+                }}
+
+                if (tracks.length === 0) {{
+                    throw new Error("No playable tracks found for library artist");
+                }}
+
+                await mk.setQueue({{ items: tracks }});
+                return {{ success: true }};
+            }}
+
+            // Use computed property [key] for standard playable types (albums, playlists, songs)
+            await mk.setQueue({{
+                [key]: id
+            }});
+            return {{ success: true }};
+        }} catch (e) {{
+            return {{ success: false, error: e.toString() }};
+        }}
+    }})();
+    "#, key, id);
 
     let res = self.execute(script, vec![]).await
         .map_err(|e| e.to_string())?;
 
-
-    let is_success: bool = serde_json::from_value(res.json().clone())
-        .map_err(|e| e.to_string())?;
+    let res_val: serde_json::Value = res.json().clone();
+    
+    let is_success = res_val.get("success")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     if is_success {
-        return Ok(id.to_string())
+        return Ok(format!("Queue Set ID: {}", id));
     }
 
-    Err("Could Not play, maybe wrong id".to_string())
-        
-    }
+    let err_msg = res_val.get("error")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Unknown JavaScript error");
+
+    Err(format!("SetQueue failed: {}", err_msg))
+}
+
+    //WORKING
     async fn play(&self) -> Result<(), String> {
     let script = "MusicKit.getInstance().play();";
     self.execute(script, vec![]).await.map_err(|e| e.to_string())?;
     Ok(())
     }   
+    
+    //WORKING
     async fn pause(&self) -> Result<(), String> {
     let script = "MusicKit.getInstance().pause();";
     self.execute(script, vec![]).await.map_err(|e| e.to_string())?;
     Ok(())
 }
+    
+    //WORKING
     async fn next_track(&self) -> Result<(), String> {
     let script = "MusicKit.getInstance().skipToNextItem();";
     self.execute(script, vec![]).await.map_err(|e| e.to_string())?;
     Ok(())
 }
+    
+    //WORKING
     async fn previous_track(&self) -> Result<(), String> {
     let script = "MusicKit.getInstance().skipToPreviousItem();";
     self.execute(script, vec![]).await.map_err(|e| e.to_string())?;
     Ok(())
 }
+    
+    //WORKING
     async fn shuffle_toggle(&self) -> Result<i64, String> {
     let script = r#"
         return window.MusicKit.getInstance().shuffleMode;
@@ -398,6 +418,7 @@ impl MusicDriver for WebDriver {
     self.execute(script, vec![]).await.map_err(|e| e.to_string())?;
     Ok(num_mode)
 }
+    
     async fn list_library_playlists(&self) -> Result<Vec<Playlist>, String> {
     let script = r#"
         return (async () => {
@@ -438,6 +459,8 @@ impl MusicDriver for WebDriver {
         )
     })
 }
+    
+    //WORKING
     async fn get_current_track(&self) -> Result<Option<Track>, String> {
     let script = r#"
 return (() => {
@@ -471,6 +494,8 @@ return (() => {
     }
     Ok(track_obj)
 }
+    
+    //Non Working root command
     async fn clear_queue(&self) -> Result<(), String> {
     let script = r#"
     MusicKit.getInstance().clearQueue()
@@ -480,6 +505,8 @@ return (() => {
     
     Ok(())
 }
+    
+    //Non Working root command
     async fn remove_queue(&self, index: u32) -> Result<(), String> {
     let script = format!(r#"
     MusicKit.getInstance().queue.remove({})
@@ -488,6 +515,8 @@ return (() => {
     
     Ok(())
 }
+    
+    //Non working root commad
     async fn list_queue(&self) -> Result<Vec<Track>, String> {
     let script = r#"
         return (async () => {
@@ -515,6 +544,8 @@ return (() => {
 
     Ok(parsed_res)
     } 
+    
+    //WORKING
     async fn volume(&self, val: Option<u32>) -> Result<i32, String> {
     let script =
         if val.is_none() {

@@ -21,10 +21,10 @@ impl PlayerCommand {
         match self {
         PlayerCommand::Search(search_args) => {
             let search_res = search_args.resolve_search(driver).await?;
-                    match search_res {
+                    let res = match search_res {
                         SearchResult::Track(track) => {
                             let id = if track.id.is_none() {
-                            return Ok(("No Matches found".as_bytes().to_vec(), false));
+                            return Ok(("No track id".as_bytes().to_vec(), false));
                             } else {
                             track.id.clone().unwrap()
                             };
@@ -33,7 +33,7 @@ impl PlayerCommand {
                     },
                     SearchResult::Playlist(playlist) => {
                         let id = if playlist.id.is_none() {
-                            return Ok(("No Matches found".as_bytes().to_vec(), false));
+                            return Ok(("No Playlist id".as_bytes().to_vec(), false));
                         } else {
                             playlist.id.clone().unwrap()
                         };
@@ -42,7 +42,7 @@ impl PlayerCommand {
                     },
                     SearchResult::Album(album) => {
                         let id = if album.id.is_none() {
-                            return Ok(("No Matches Found".as_bytes().to_vec(), false));
+                            return Ok(("No Album id".as_bytes().to_vec(), false));
                         } else {
                             album.id.clone().unwrap()
                         };
@@ -52,7 +52,7 @@ impl PlayerCommand {
                     }
                     SearchResult::Artist(artist) => {
                         let id = if artist.id.is_none() {
-                            return Ok(("No Matches Found".as_bytes().to_vec(), false));
+                            return Ok(("No Artist id".as_bytes().to_vec(), false));
                         } else {
                             artist.id.clone().unwrap()
                         };
@@ -60,7 +60,7 @@ impl PlayerCommand {
                         (artist.pretty_display(), id)
                     }
                 };
-                            Ok(("No Matches Found".as_bytes().to_vec(), false))
+                Ok((res.0.as_bytes().to_vec(), false))
             }
         PlayerCommand::Current => {
             if let Some(track) = driver.get_current_track().await? {
@@ -108,26 +108,26 @@ impl PlayerCommand {
             }
         },
         PlayerCommand::SetQueue(search_args) => {
+            let is_library = search_args.is_target_library;
             let search_res = search_args.resolve_search(driver).await?;
-
                 let (res_type, id) = match search_res {
                     SearchResult::Album(album) => {
                         if album.id.is_none() {
                             return Ok(("No Track found".as_bytes().to_vec(), false))
                         }
-                        (MediaType::Song, album.id)  
+                        (MediaType::Album, album.id)  
                     },
                     SearchResult::Artist(artist) => {
                         if artist.id.is_none() {
                             return Ok(("No Track found".as_bytes().to_vec(), false))
                         }
-                        (MediaType::Song, artist.id)  
+                        (MediaType::Artist, artist.id)  
                     },
                     SearchResult::Playlist(playlist) => {
                         if playlist.id.is_none() {
                             return Ok(("No Track found".as_bytes().to_vec(), false))
                         }
-                        (MediaType::Song, playlist.id)  
+                        (MediaType::Playlist, playlist.id)  
                     },
                     SearchResult::Track(track) => {
                         if track.id.is_none() {
@@ -136,7 +136,7 @@ impl PlayerCommand {
                         (MediaType::Song, track.id)  
                     }
                 };
-                let id = driver.set_queue(&res_type, &id.unwrap()).await
+                let id = driver.set_queue(&res_type, &id.unwrap(), is_library).await
                 .map_err(|e| e.to_string())?;
                 
                 driver.play().await?;
