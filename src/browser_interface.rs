@@ -296,8 +296,6 @@ async fn set_queue(&self, item_type: &MediaType, id: &str, is_library: bool) -> 
                     const res = await mk.api.music(`v1/me/library/songs/${{idStr}}`);
                     tracks = res?.data?.data || [];
                 }} else if (typeStr === "albums") {{
-                    // Try resolving library album to catalog counterpart for robust track listing, 
-                    // otherwise fetch library tracks.
                     const res = await mk.api.music(`v1/me/library/albums/${{idStr}}`);
                     const resource = res?.data?.data?.[0];
                     const catalogId = resource?.relationships?.catalog?.data?.[0]?.id;
@@ -317,11 +315,34 @@ async fn set_queue(&self, item_type: &MediaType, id: &str, is_library: bool) -> 
                     const resource = res?.data?.data?.[0];
                     const catalogId = resource?.relationships?.catalog?.data?.[0]?.id;
                     
-                    if (catalogId) {{
-                        const topRes = await mk.api.music(`v1/catalog/${{storefront}}/artists/${{catalogId}}/songs`);
-                        tracks = topRes?.data?.data || [];
-                    }} else {{
-                        const songsRes = await mk.api.music(`v1/me/library/songs`, {{ limit: 25 }});
+                    let resolvedCatalogId = catalogId;
+                    if (!resolvedCatalogId) {{
+                        // Search catalog by artist name if no direct relationship exists
+                        const artistName = resource?.attributes?.name;
+                        if (artistName) {{
+                            const searchRes = await mk.api.music(`v1/catalog/${{storefront}}/search`, {{
+                                term: artistName,
+                                types: 'artists',
+                                limit: 1
+                            }});
+                            resolvedCatalogId = searchRes?.data?.results?.artists?.data?.[0]?.id;
+                        }}
+                    }}
+
+                    if (resolvedCatalogId) {{
+                        // Fetch albums for the catalog artist to build full discography
+                        const albumsRes = await mk.api.music(`v1/catalog/${{storefront}}/artists/${{resolvedCatalogId}}/albums`, {{ limit: 25 }});
+                        const albums = albumsRes?.data?.data || [];
+                        
+                        for (const album of albums) {{
+                            const albumTracksRes = await mk.api.music(`v1/catalog/${{storefront}}/albums/${{album.id}}/tracks`);
+                            const albumTracks = albumTracksRes?.data?.data || [];
+                            tracks.push(...albumTracks);
+                        }}
+                    }}
+                    
+                    if (tracks.length === 0) {{
+                        const songsRes = await mk.api.music(`v1/me/library/songs`, {{ limit: 100 }});
                         tracks = songsRes?.data?.data || [];
                     }}
                 }}
@@ -337,13 +358,31 @@ async fn set_queue(&self, item_type: &MediaType, id: &str, is_library: bool) -> 
                     const res = await mk.api.music(`v1/catalog/${{storefront}}/playlists/${{idStr}}/tracks`);
                     tracks = res?.data?.data || [];
                 }} else if (typeStr === "artists") {{
-                    const res = await mk.api.music(`v1/catalog/${{storefront}}/artists/${{idStr}}/songs`);
-                    tracks = res?.data?.data || [];
+                    // Fetch artist's albums to gather their full discography of actual tracks
+                    const albumsRes = await mk.api.music(`v1/catalog/${{storefront}}/artists/${{idStr}}/albums`, {{ limit: 25 }});
+                    const albums = albumsRes?.data?.data || [];
+                    
+                    for (const album of albums) {{
+                        const albumTracksRes = await mk.api.music(`v1/catalog/${{storefront}}/albums/${{album.id}}/tracks`);
+                        const albumTracks = albumTracksRes?.data?.data || [];
+                        tracks.push(...albumTracks);
+                    }}
+
+                    // Fallback to top songs if albums endpoint returned nothing
+                    if (tracks.length === 0) {{
+                        const songsRes = await mk.api.music(`v1/catalog/${{storefront}}/artists/${{idStr}}/songs`, {{ limit: 100 }});
+                        tracks = songsRes?.data?.data || [];
+                    }}
                 }}
             }}
 
             if (!tracks || tracks.length === 0) {{
                 throw new Error("No playable tracks found for item ID: " + idStr);
+            }}
+
+            // If it's an artist, shuffle the tracks randomly so every playback is unique and fresh
+            if (typeStr === "artists") {{
+                tracks.sort(() => Math.random() - 0.5);
             }}
 
             await mk.setQueue({{ items: tracks }});
