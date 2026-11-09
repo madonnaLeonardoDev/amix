@@ -272,27 +272,11 @@ async fn search(&self, term: &str, item_types: Vec<MediaType>, is_library: bool,
         
     }
 
-    //Works Only for Songs
+    //WORKS
 async fn set_queue(&self, item_type: &MediaType, id: &str, is_library: bool) -> Result<String, String> {
-    let singular_key = match item_type {
-        MediaType::Album => "album",
-        MediaType::Playlist => "playlist",
-        MediaType::Artist => "artist",
-        MediaType::Song => "song",
-    };
-
-    let key = if is_library {
-        format!("library-{}", item_type.as_str())
-    } else {
-        singular_key.to_string()
-    };
+    let base_type = item_type.as_str(); // "songs", "albums", "playlists", "artists"
 
     let script = format!(r#"
-    const key = "{}";
-    const id = "{}";
-    console.log(key);
-    console.log(id);
-
     return (async () => {{
         try {{
             const mk = MusicKit.getInstance();
@@ -300,53 +284,79 @@ async fn set_queue(&self, item_type: &MediaType, id: &str, is_library: bool) -> 
                 await mk?.authorize();
             }}
 
-            const storefront = mk.storefrontId || 'us';
+            const storefront = mk.storefrontId || 'it';
+            const isLib = {};
+            const typeStr = "{}";
+            const idStr = "{}";
 
-            // Artists are metadata containers and cannot be played directly via shorthand.
-            // We fetch their top songs or related tracks and populate the queue items instead.
-            if (key === "artist") {{
-                const res = await mk.api.music(`v1/catalog/${{storefront}}/artists/${{id}}/songs`);
-                const tracks = res?.data?.data;
-                if (!tracks || tracks.length === 0) {{
-                    throw new Error("No playable tracks found for artist ID: " + id);
-                }}
-                await mk.setQueue({{ items: tracks }});
-                return {{ success: true }};
-            }} else if (key === "library-artists") {{
-                // Resolve library artist to catalog ID if available, or fetch top songs / library tracks
-                const res = await mk.api.music(`v1/me/library/artists/${{id}}`);
-                const resource = res?.data?.data?.[0];
-                const catalogId = resource?.relationships?.catalog?.data?.[0]?.id;
-                
-                let tracks = [];
-                if (catalogId) {{
-                    const topRes = await mk.api.music(`v1/catalog/${{storefront}}/artists/${{catalogId}}/songs`);
-                    tracks = topRes?.data?.data;
-                }}
-                
-                if (!tracks || tracks.length === 0) {{
-                    const songsRes = await mk.api.music(`v1/me/library/songs`, {{ limit: 25 }});
-                    tracks = songsRes?.data?.data || [];
-                }}
+            let tracks = [];
 
-                if (tracks.length === 0) {{
-                    throw new Error("No playable tracks found for library artist");
+            if (isLib) {{
+                if (typeStr === "songs") {{
+                    const res = await mk.api.music(`v1/me/library/songs/${{idStr}}`);
+                    tracks = res?.data?.data || [];
+                }} else if (typeStr === "albums") {{
+                    // Try resolving library album to catalog counterpart for robust track listing, 
+                    // otherwise fetch library tracks.
+                    const res = await mk.api.music(`v1/me/library/albums/${{idStr}}`);
+                    const resource = res?.data?.data?.[0];
+                    const catalogId = resource?.relationships?.catalog?.data?.[0]?.id;
+                    
+                    if (catalogId) {{
+                        const catRes = await mk.api.music(`v1/catalog/${{storefront}}/albums/${{catalogId}}/tracks`);
+                        tracks = catRes?.data?.data || [];
+                    }} else {{
+                        const tracksRes = await mk.api.music(`v1/me/library/albums/${{idStr}}/tracks`);
+                        tracks = tracksRes?.data?.data || [];
+                    }}
+                }} else if (typeStr === "playlists") {{
+                    const res = await mk.api.music(`v1/me/library/playlists/${{idStr}}/tracks`);
+                    tracks = res?.data?.data || [];
+                }} else if (typeStr === "artists") {{
+                    const res = await mk.api.music(`v1/me/library/artists/${{idStr}}`);
+                    const resource = res?.data?.data?.[0];
+                    const catalogId = resource?.relationships?.catalog?.data?.[0]?.id;
+                    
+                    if (catalogId) {{
+                        const topRes = await mk.api.music(`v1/catalog/${{storefront}}/artists/${{catalogId}}/songs`);
+                        tracks = topRes?.data?.data || [];
+                    }} else {{
+                        const songsRes = await mk.api.music(`v1/me/library/songs`, {{ limit: 25 }});
+                        tracks = songsRes?.data?.data || [];
+                    }}
                 }}
-
-                await mk.setQueue({{ items: tracks }});
-                return {{ success: true }};
+            }} else {{
+                // Catalog items
+                if (typeStr === "songs") {{
+                    await mk.setQueue({{ song: idStr }});
+                    return {{ success: true }};
+                }} else if (typeStr === "albums") {{
+                    const res = await mk.api.music(`v1/catalog/${{storefront}}/albums/${{idStr}}/tracks`);
+                    tracks = res?.data?.data || [];
+                }} else if (typeStr === "playlists") {{
+                    const res = await mk.api.music(`v1/catalog/${{storefront}}/playlists/${{idStr}}/tracks`);
+                    tracks = res?.data?.data || [];
+                }} else if (typeStr === "artists") {{
+                    const res = await mk.api.music(`v1/catalog/${{storefront}}/artists/${{idStr}}/songs`);
+                    tracks = res?.data?.data || [];
+                }}
             }}
 
-            // Use computed property [key] for standard playable types (albums, playlists, songs)
-            await mk.setQueue({{
-                [key]: id
-            }});
+            if (!tracks || tracks.length === 0) {{
+                throw new Error("No playable tracks found for item ID: " + idStr);
+            }}
+
+            await mk.setQueue({{ items: tracks }});
             return {{ success: true }};
         }} catch (e) {{
             return {{ success: false, error: e.toString() }};
         }}
     }})();
-    "#, key, id);
+    "#, 
+    if is_library { "true" } else { "false" },
+    base_type,
+    id
+    );
 
     let res = self.execute(script, vec![]).await
         .map_err(|e| e.to_string())?;
