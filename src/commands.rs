@@ -289,8 +289,10 @@ pub enum PlayerCommand{
     AutoPlayToggle,
     Volume(Option<u32>),
     SetQueue(SearchArgs),
-    QueueNext(SearchArgs),
-    QueueAdd(SearchArgs),
+    QueueAdd{
+        search: SearchArgs,
+        is_next: bool
+    },
     Search(SearchArgs),
     ListPlaylists,
     ListQueueTracks(Option<u32>),
@@ -325,9 +327,9 @@ impl Commands {
                     vec![t]
                 } else {
                     let mut t = Vec::new();
-                    t.push(MediaType::Artist);
                     t.push(MediaType::Song);
                     t.push(MediaType::Album);
+                    t.push(MediaType::Artist);
                     t.push(MediaType::Playlist);
                     t
                 };
@@ -350,14 +352,10 @@ impl Commands {
                     t.push(MediaType::Playlist);
                     t
                 };
-                if *next {
-                    return Ok(PlayerCommand::QueueNext(
-                    SearchArgs { target: target.clone().unwrap(), search_type: search_type, is_target_library: *library, limit: Some(1) }
-                    ))
-                }
-                Ok(PlayerCommand::QueueAdd(
-                    SearchArgs { target: target.clone().unwrap(), search_type: search_type, is_target_library: *library, limit:Some(1) }
-                ))
+                Ok(PlayerCommand::QueueAdd{
+                    search: SearchArgs { target: target.clone().unwrap(), search_type: search_type, is_target_library: *library, limit:Some(1) },
+                    is_next: *next
+                })
             },
 
             Commands::Ls(command) => {

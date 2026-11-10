@@ -19,6 +19,7 @@ pub fn format_time(time_ms: u32) -> String {
 impl PlayerCommand {
     pub async fn execute_daemon(self, driver:&WebDriver) -> Result<(Vec<u8>, bool /* requires persistent connection */), String> {
         match self {
+        //WORKING
         PlayerCommand::Search(search_args) => {
             let search_res = search_args.resolve_search(driver).await?;
                     let res = match search_res {
@@ -62,6 +63,7 @@ impl PlayerCommand {
                 };
                 Ok((res.0.as_bytes().to_vec(), false))
             }
+        //WORKING
         PlayerCommand::Current => {
             if let Some(track) = driver.get_current_track().await? {
                 let title:String = if track.title.is_none(){
@@ -107,6 +109,7 @@ impl PlayerCommand {
             Err(e) => return Err(e)
             }
         },
+        //WORKING
         PlayerCommand::SetQueue(search_args) => {
             let is_library = search_args.is_target_library;
             let search_res = search_args.resolve_search(driver).await?;
@@ -143,6 +146,7 @@ impl PlayerCommand {
 
                 return Ok((format!("Playing: {}",id).as_bytes().to_vec(), false))
             }
+        //WORKING
         PlayerCommand::PlayStop => {
             let script = r#"
                 const mk = MusicKit.getInstance();
@@ -170,6 +174,7 @@ impl PlayerCommand {
                 return Ok(("Play".to_string().as_bytes().to_vec(), false))
             }
         },
+        //WORKING
         PlayerCommand::NextTrack  => {
             if let Err(e) = driver.next_track().await {
                     return Err(e.to_string());
@@ -177,6 +182,7 @@ impl PlayerCommand {
 
             Ok(("Next Track".to_string().as_bytes().to_vec(), false))
         },
+        //WORKING
         PlayerCommand::PrevTrack  => {
             if let Err(e) = driver.previous_track().await {
                 return Err(e.to_string());
@@ -184,6 +190,7 @@ impl PlayerCommand {
 
             Ok(("Previous Track".to_string().as_bytes().to_vec(), false))
         },
+        //WORKING
         PlayerCommand::ShuffleToggle => {
             let mode = driver.shuffle_toggle().await
                     .map_err(|e| e.to_string())?;
@@ -222,6 +229,7 @@ impl PlayerCommand {
             }
             Ok((formatted_str.as_bytes().to_vec(), false))
         },
+        //WORKING
         PlayerCommand::Volume(val) => {
             if let Some(v) = val{
                 if v > 100 {
@@ -237,9 +245,11 @@ impl PlayerCommand {
                 Ok((format!("Volume: {}", volume).as_bytes().to_vec(), false))
             }
         },
+        //WORKING
         PlayerCommand::DisplaModeDaemon => {
             Ok((vec![0u8; 1], true))
         },
+        //WORKING
         PlayerCommand::GetNextTrackMeta => {
                 let track_queue = driver.list_queue().await?;
 
@@ -252,6 +262,42 @@ impl PlayerCommand {
 
                 return Ok((bytes, false))
             },
+        //WORKING
+        PlayerCommand::QueueAdd{search: search_args, is_next} => {
+            let search_res = driver.search(&search_args.target, search_args.search_type, search_args.is_target_library, search_args.limit.unwrap_or(1)).await?;
+            match search_res {
+                SearchResult::Album(item) => {
+                    let id = match item.id {
+                        Some(id) => id,
+                        None => return Err("Cannot get results id".to_string())
+                    };
+                    driver.queue(&MediaType::Album,&id, is_next).await?;
+
+                    return Ok((format!("Added to queue: {}", id).as_bytes().to_vec(), false));
+                },
+                SearchResult::Playlist(item) => {
+                    let id = match item.id {
+                        Some(id) => id,
+                        None => return Err("Cannot get results id".to_string())
+                    };
+                    driver.queue(&MediaType::Playlist,&id, is_next).await?;
+
+                    return Ok((format!("Added to queue: {}", id).as_bytes().to_vec(), false));
+                },
+                SearchResult::Track(item) => {
+                    let id = match item.id {
+                        Some(id) => id,
+                        None => return Err("Cannot get results id".to_string())
+                    };
+                    driver.queue(&MediaType::Song,&id, is_next).await?;
+
+                    return Ok((format!("Added to queue: {}", id).as_bytes().to_vec(), false));
+                },
+                SearchResult::Artist(_) => {
+                    return Err("Cannot queue an artist".to_string());
+                }
+            }
+        },
         _=> {
             Err("Invalid Command".to_string())
         }

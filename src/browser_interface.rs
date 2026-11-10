@@ -2,7 +2,6 @@ use std::vec;
 use crate::{commands::MediaType, daemon_controls::format_time};
 use thirtyfour::prelude::*;
 use serde::{Serialize, Deserialize};
-use tokio_util::bytes::buf::Limit;
 use wincode_derive::{SchemaRead, SchemaWrite};
 
 #[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite, PartialEq, Clone)]
@@ -111,7 +110,7 @@ pub enum SearchResult {
 
 pub trait MusicDriver {
     async fn search(&self, query: &str, item_type: Vec<MediaType>, is_library: bool, limit: u32) -> Result<SearchResult, String>; 
-    async fn play_next(&self, item_type: &MediaType, id: &str) -> Result<String, String>;
+    async fn queue(&self, item_type: &MediaType, id: &str, is_next: bool) -> Result<String, String>;
     async fn set_queue(&self, item_type: &MediaType, id: &str, is_library: bool) -> Result<String, String>;
     async fn play(&self) -> Result<(), String>; 
     async fn pause(&self) -> Result<(), String>; 
@@ -239,8 +238,19 @@ async fn search(&self, term: &str, item_types: Vec<MediaType>, is_library: bool,
 
     search_result.ok_or_else(|| "No Matches Found".to_string())
 }
+    //WORKING
+    async fn queue(&self, item_type: &MediaType, id: &str, is_next: bool) -> Result<String, String> {
+    
+    let method = if is_next {
+        "playNext"
+    } else {
+        "playLater"
+    };
 
-    async fn play_next(&self, item_type: &MediaType, id: &str) -> Result<String, String> {
+    if item_type == &MediaType::Artist {
+        return Err("Cant Queue an artist".to_string());
+    }
+    
     let script = format!(r#"
     return (async () => {{
         const mk = MusicKit.getInstance();
@@ -248,14 +258,14 @@ async fn search(&self, term: &str, item_types: Vec<MediaType>, is_library: bool,
         await mk?.authorize();
     }}
     try {{ 
-    await mk.playNext({{ {}: '{}'}});
+    await mk.{}({{ {}: '{}'}});
     return true;
     }}
     catch (e) {{
         return false;
     }}
     }})()
-    "#, item_type.as_str(), id);
+    "#,method, item_type.as_str(), id);
 
     let res = self.execute(script, vec![]).await
         .map_err(|e| e.to_string())?;
@@ -272,9 +282,18 @@ async fn search(&self, term: &str, item_types: Vec<MediaType>, is_library: bool,
         
     }
 
-    //WORKS
+    //WORKING
 async fn set_queue(&self, item_type: &MediaType, id: &str, is_library: bool) -> Result<String, String> {
-    let base_type = item_type.as_str(); // "songs", "albums", "playlists", "artists"
+    let key = if is_library {
+        format!("library-{}", item_type.as_str())
+    } else {
+        match item_type {
+            MediaType::Song => "song".to_string(),
+            MediaType::Album => "album".to_string(),
+            MediaType::Playlist => "playlist".to_string(),
+            MediaType::Artist => "artist".to_string(),
+        }
+    };
 
     let script = format!(r#"
     return (async () => {{
@@ -284,124 +303,40 @@ async fn set_queue(&self, item_type: &MediaType, id: &str, is_library: bool) -> 
                 await mk?.authorize();
             }}
 
-            const storefront = mk.storefrontId || 'it';
-            const isLib = {};
-            const typeStr = "{}";
-            const idStr = "{}";
+            const key = "{}";
+            const id = "{}";
 
-            let tracks = [];
+            if (key === "artist" || key === "library-artists") {{
+    let catalogId = id;
+    if (key === "library-artists") {{
+        const libRes = await mk.api.music(`v1/me/library/artists/${{id}}`, {{ include: 'catalog' }});
+        catalogId = libRes?.data?.data?.[0]?.relationships?.catalog?.data?.[0]?.id;
+        if (!catalogId) {{
+            return {{ success: false, error: "No catalog id for this library artist" }};
+        }}
+    }}
 
-            if (isLib) {{
-                if (typeStr === "songs") {{
-                    const res = await mk.api.music(`v1/me/library/songs/${{idStr}}`);
-                    tracks = res?.data?.data || [];
-                }} else if (typeStr === "albums") {{
-                    const res = await mk.api.music(`v1/me/library/albums/${{idStr}}`);
-                    const resource = res?.data?.data?.[0];
-                    const catalogId = resource?.relationships?.catalog?.data?.[0]?.id;
-                    
-                    if (catalogId) {{
-                        const catRes = await mk.api.music(`v1/catalog/${{storefront}}/albums/${{catalogId}}/tracks`);
-                        tracks = catRes?.data?.data || [];
-                    }} else {{
-                        const tracksRes = await mk.api.music(`v1/me/library/albums/${{idStr}}/tracks`);
-                        tracks = tracksRes?.data?.data || [];
-                    }}
-                }} else if (typeStr === "playlists") {{
-                    const res = await mk.api.music(`v1/me/library/playlists/${{idStr}}/tracks`);
-                    tracks = res?.data?.data || [];
-                }} else if (typeStr === "artists") {{
-                    const res = await mk.api.music(`v1/me/library/artists/${{idStr}}`);
-                    const resource = res?.data?.data?.[0];
-                    const catalogId = resource?.relationships?.catalog?.data?.[0]?.id;
-                    
-                    let resolvedCatalogId = catalogId;
-                    if (!resolvedCatalogId) {{
-                        // Search catalog by artist name if no direct relationship exists
-                        const artistName = resource?.attributes?.name;
-                        if (artistName) {{
-                            const searchRes = await mk.api.music(`v1/catalog/${{storefront}}/search`, {{
-                                term: artistName,
-                                types: 'artists',
-                                limit: 1
-                            }});
-                            resolvedCatalogId = searchRes?.data?.results?.artists?.data?.[0]?.id;
-                        }}
-                    }}
+    // Artist-only station: note the "a-" prefix
+    const stationId = `ra.a-${{catalogId}}`;
+    await mk.setQueue({{ station: stationId, startPlaying: true }});
+    return {{ success: true, station: stationId }};
+}}
 
-                    if (resolvedCatalogId) {{
-                        // Fetch albums for the catalog artist to build full discography
-                        const albumsRes = await mk.api.music(`v1/catalog/${{storefront}}/artists/${{resolvedCatalogId}}/albums`, {{ limit: 25 }});
-                        const albums = albumsRes?.data?.data || [];
-                        
-                        for (const album of albums) {{
-                            const albumTracksRes = await mk.api.music(`v1/catalog/${{storefront}}/albums/${{album.id}}/tracks`);
-                            const albumTracks = albumTracksRes?.data?.data || [];
-                            tracks.push(...albumTracks);
-                        }}
-                    }}
-                    
-                    if (tracks.length === 0) {{
-                        const songsRes = await mk.api.music(`v1/me/library/songs`, {{ limit: 100 }});
-                        tracks = songsRes?.data?.data || [];
-                    }}
-                }}
-            }} else {{
-                // Catalog items
-                if (typeStr === "songs") {{
-                    await mk.setQueue({{ song: idStr }});
-                    return {{ success: true }};
-                }} else if (typeStr === "albums") {{
-                    const res = await mk.api.music(`v1/catalog/${{storefront}}/albums/${{idStr}}/tracks`);
-                    tracks = res?.data?.data || [];
-                }} else if (typeStr === "playlists") {{
-                    const res = await mk.api.music(`v1/catalog/${{storefront}}/playlists/${{idStr}}/tracks`);
-                    tracks = res?.data?.data || [];
-                }} else if (typeStr === "artists") {{
-                    // Fetch artist's albums to gather their full discography of actual tracks
-                    const albumsRes = await mk.api.music(`v1/catalog/${{storefront}}/artists/${{idStr}}/albums`, {{ limit: 25 }});
-                    const albums = albumsRes?.data?.data || [];
-                    
-                    for (const album of albums) {{
-                        const albumTracksRes = await mk.api.music(`v1/catalog/${{storefront}}/albums/${{album.id}}/tracks`);
-                        const albumTracks = albumTracksRes?.data?.data || [];
-                        tracks.push(...albumTracks);
-                    }}
+            await mk.setQueue({{
+                [key]: id
+            }});
 
-                    // Fallback to top songs if albums endpoint returned nothing
-                    if (tracks.length === 0) {{
-                        const songsRes = await mk.api.music(`v1/catalog/${{storefront}}/artists/${{idStr}}/songs`, {{ limit: 100 }});
-                        tracks = songsRes?.data?.data || [];
-                    }}
-                }}
-            }}
-
-            if (!tracks || tracks.length === 0) {{
-                throw new Error("No playable tracks found for item ID: " + idStr);
-            }}
-
-            // If it's an artist, shuffle the tracks randomly so every playback is unique and fresh
-            if (typeStr === "artists") {{
-                tracks.sort(() => Math.random() - 0.5);
-            }}
-
-            await mk.setQueue({{ items: tracks }});
             return {{ success: true }};
         }} catch (e) {{
             return {{ success: false, error: e.toString() }};
         }}
     }})();
-    "#, 
-    if is_library { "true" } else { "false" },
-    base_type,
-    id
-    );
+    "#, key, id);
 
     let res = self.execute(script, vec![]).await
         .map_err(|e| e.to_string())?;
 
     let res_val: serde_json::Value = res.json().clone();
-    
     let is_success = res_val.get("success")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
@@ -416,7 +351,6 @@ async fn set_queue(&self, item_type: &MediaType, id: &str, is_library: bool) -> 
 
     Err(format!("SetQueue failed: {}", err_msg))
 }
-
     //WORKING
     async fn play(&self) -> Result<(), String> {
     let script = "MusicKit.getInstance().play();";
