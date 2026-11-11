@@ -200,6 +200,7 @@ impl PlayerCommand {
                 }
             Ok(("Shuffling Off".to_string().as_bytes().to_vec(), false))
         },
+        //WORKING
         PlayerCommand::RmQueue(index) => {
             match index {
                 None => {
@@ -212,20 +213,16 @@ impl PlayerCommand {
                 }
             }
         },
+        //WORKING
         PlayerCommand::ListQueueTracks(limit) => {
             let queue = driver.list_queue().await?;
             let mut formatted_str: String = String::new();
-            if let Some(mut l) = limit {
-                for track in queue {
-                    if l > 0 {
-                       formatted_str.push_str(&track.pretty_display()); 
-                    }
-                    l-=1;
-                }
-            } else {
-                for track in queue {
-                    formatted_str.push_str(&track.pretty_display());
-                }
+            let tracks = match limit {
+                Some(l) => queue.into_iter().take(l as usize).collect::<Vec<Track>>(),
+                None => queue 
+            };
+            for track in tracks {
+                formatted_str.push_str(&track.pretty_display());
             }
             Ok((formatted_str.as_bytes().to_vec(), false))
         },
@@ -298,6 +295,16 @@ impl PlayerCommand {
                 }
             }
         },
+        //WORKING
+        PlayerCommand::AutoPlayToggle => {
+            let res = driver.autoplay_toggle().await?;
+            if res {
+                Ok(("Autoplay On".as_bytes().to_vec(), false))
+            } else {
+                Ok(("Autoplay Off".as_bytes().to_vec(), false))
+            }
+            
+        }
         _=> {
             Err("Invalid Command".to_string())
         }

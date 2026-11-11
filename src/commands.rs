@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand, ValueEnum, Args, ArgGroup};
-use thirtyfour::WebDriver;
+use thirtyfour::{WebDriver};
 use wincode_derive::{SchemaRead, SchemaWrite};
 
 use crate::browser_interface::{MusicDriver, SearchResult};
@@ -42,13 +42,7 @@ impl MediaType {
 }
 
 #[derive(Args, Debug, Clone, SchemaRead, SchemaWrite)]
-pub struct LsQueueArgs {
-    #[arg(short, long)]
-    pub result: Option<u32>,
-}
-
-#[derive(Args, Debug, Clone, SchemaRead, SchemaWrite)]
-pub struct LsSearchArgs {
+pub struct FindSearchArgs {
     pub query: String,
     #[arg(short, long)]
     pub result: Option<u32>,
@@ -56,57 +50,6 @@ pub struct LsSearchArgs {
     pub library: bool,
     #[arg(short = 't', long = "type")]
     pub search_type: Option<MediaType>,
-}
-
-#[derive(Subcommand, Debug, Clone, SchemaRead, SchemaWrite)]
-pub enum LsSubcommands {
-    /// List current playback queue
-    Queue(LsQueueArgs),
-
-    /// List tracks in a specific playlist
-    Playlist
-}
-
-#[derive(Args, Debug, Clone, SchemaRead, SchemaWrite)]
-pub struct LsCommand {
-    #[command(subcommand)]
-    pub subcommand: Option<LsSubcommands>,
-
-    #[command(flatten)]
-    pub search_args: LsSearchArgs,
-}
-
-#[derive(Args, Debug, Clone, SchemaRead, SchemaWrite)]
-pub struct RmQueue {
-    pub queue: u32,
-}
-
-#[derive(Args, Debug, Clone, SchemaRead, SchemaWrite)]
-#[command(
-    group = ArgGroup::new("track_target")
-        .required(true)
-        .multiple(false),
-    group = ArgGroup::new("playlist_target")
-        .required(true)
-        .multiple(false),
-)]
-pub struct RmFromPlaylist {
-    #[arg(value_name = "TRACK_QUERY", group = "track_target", help = "Track name or query")]
-    pub track_query: String,
-
-    #[arg(value_name = "PLAYLIST_QUERY", group = "playlist_target", help = "Playlist name or query")]
-    pub playlist_query: String,
-}
-
-/// The two mutually exclusive modes for the rm command
-#[derive(Args, Debug, Clone, SchemaRead, SchemaWrite)]
-#[group(required = true, multiple = false)]
-pub struct RmCommand {
-    #[command(flatten)]
-    pub queue_mode: Option<RmQueue>,
-
-    #[command(flatten)]
-    pub playlist_mode: Option<RmFromPlaylist>,
 }
 
 #[derive(Args, Debug, Clone, SchemaRead, SchemaWrite)]
@@ -126,6 +69,33 @@ pub struct MkPlCommand{
         help = "playlist name"
     )]
     pub playlist_name: String,
+}
+
+
+#[derive(Args, Debug, Clone, SchemaRead, SchemaWrite)]
+#[command(
+    group = ArgGroup::new("rm_target")
+        .required(true)
+        .multiple(false),
+)]
+pub struct RmCommand {
+    /// Queue index to remove or '*' for all
+    #[arg(
+        value_name = "INDEX",
+        group = "rm_target",
+        help = "Queue index (number) or '*' to clear"
+    )]
+    pub index: Option<String>,
+
+    /// Remove a track from a playlist (-p <TRACK> <PLAYLIST>)
+    #[arg(
+        short = 'p',
+        num_args = 2,
+        value_names = &["TRACK", "PLAYLIST"],
+        group = "rm_target",
+        help = "Track and playlist names"
+    )]
+    pub p_args: Option<Vec<String>>,
 }
 
 #[derive(Args, Debug, Clone, SchemaRead, SchemaWrite)]
@@ -218,11 +188,14 @@ pub enum Commands {
         next: bool,
     },
     #[command()]
-    Ls(LsCommand),
+    Ls{
+        result: Option<u32>
+    },
+    #[command()]
+    Find(FindSearchArgs),
 
     #[command()]
     Rm(RmCommand),
-
     #[command()]
     Rmpl(RmPlCommand),
 
@@ -357,25 +330,11 @@ impl Commands {
                     is_next: *next
                 })
             },
-
-            Commands::Ls(command) => {
-                if let Some(subcommand) = command.subcommand.as_ref() {
-                    match subcommand {
-                        LsSubcommands::Playlist => {
-                            return Ok(PlayerCommand::ListPlaylists);
-                        }
-                        LsSubcommands::Queue(queue_args) => {
-                           return Ok(PlayerCommand::ListQueueTracks(queue_args.result))
-                        }
-                    }
-
-
-
-                } else {
-                    let query = &command.search_args.query;
-                    let result = command.search_args.result;
-                    let is_library = command.search_args.library;
-                    let search_type = if let Some(t) = command.search_args.search_type {
+            Commands::Find(search_args) => {
+                    let query = &search_args.query;
+                    let result = search_args.result;
+                    let is_library = search_args.library;
+                    let search_type = if let Some(t) = search_args.search_type {
                         vec![t]
                     } else {
                         let mut t = Vec::new();
@@ -387,33 +346,32 @@ impl Commands {
                     };
 
                     return Ok(PlayerCommand::Search (SearchArgs { target: query.to_string(), search_type, is_target_library: is_library , limit: result}))
-                }
-            }
-
+            },
+            Commands::Ls { result } => {
+                Ok(PlayerCommand::ListQueueTracks(*result))
+            },
             Commands::Rm(command) => {
-                match (command.playlist_mode.clone(), command.queue_mode.clone()) {
-                    (Some(rm_from_pl), None) => {
-                        let track_target_search: String = rm_from_pl.track_query;
-
-                        let playlist_target_search: String = rm_from_pl.playlist_query;
-
-
-
-                        return Ok(PlayerCommand::RmFromPlaylist { track_target_search: SearchArgs {
-                                target: track_target_search, search_type: vec![MediaType::Song], is_target_library: true , limit: Some(1)}, 
-
-                             playlist_target_search: SearchArgs {
-                                target: playlist_target_search,  search_type: vec![MediaType::Playlist], is_target_library: true, limit: Some(1)} })
+                match (command.index.as_ref(), command.p_args.as_ref()) {
+                    (Some(i), None) => {
+                        let index = if i == "%" {
+                            None
+                        } else {
+                            let index = match i.parse::<u32>() {
+                                Ok(i) => i,
+                                Err(_) => return Err("Index argument has to be a valid number or '*' to select all".to_string())
+                            };
+                            Some(index)
+                        };
+                        return Ok(PlayerCommand::RmQueue(index))
                     },
-                    (None, Some(rmq)) => {
-                        return Ok(PlayerCommand::RmQueue(Some(rmq.queue)));
+                    (None, Some(args)) => {
+                        return Ok(PlayerCommand::RmFromPlaylist { 
+                            track_target_search: SearchArgs { target: args[0].to_owned(), search_type: vec![MediaType::Song], is_target_library: true, limit: Some(1) },
+                             playlist_target_search: SearchArgs { target: args[1].to_owned(), search_type: vec![MediaType::Playlist], is_target_library: true, limit: Some(1) } })
                     },
-                    (None, None) => {
-                        return Ok(PlayerCommand::RmQueue(None));
-                    },
-                    (Some(_), Some(_)) => {
-                        return Err("Either rm queue or rm from pl".to_string())
-                    }
+                    (None, None) => return Err("Either rm -p [INDEX / *] or rm -p [Query / Id] [Query / Id]".to_string()),
+                    (Some(_), Some(_)) => return Err("Either rm -p [INDEX / *] or rm -p [Query / Id] [Query / Id]".to_string())
+
                 }
             }
 

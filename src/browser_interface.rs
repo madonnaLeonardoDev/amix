@@ -123,6 +123,7 @@ pub trait MusicDriver {
     async fn remove_queue(&self, index: u32) -> Result<(), String>;
     async fn list_queue(&self) -> Result<Vec<Track>, String>;
     async fn volume(&self, val: Option<u32>) -> Result<i32, String>;
+    async fn autoplay_toggle(&self) -> Result<bool, String>;
 }
 
 impl MusicDriver for WebDriver {
@@ -478,7 +479,7 @@ return (() => {
     Ok(track_obj)
 }
     
-    //Non Working root command
+    //WORKING
     async fn clear_queue(&self) -> Result<(), String> {
     let script = r#"
     MusicKit.getInstance().clearQueue()
@@ -489,7 +490,7 @@ return (() => {
     Ok(())
 }
     
-    //Non Working root command
+    //WORKING
     async fn remove_queue(&self, index: u32) -> Result<(), String> {
     let script = format!(r#"
     MusicKit.getInstance().queue.remove({})
@@ -499,7 +500,7 @@ return (() => {
     Ok(())
 }
     
-    //Non working root commad
+    //WORKING
     async fn list_queue(&self) -> Result<Vec<Track>, String> {
     let script = r#"
         return (async () => {
@@ -555,5 +556,26 @@ return (() => {
             .map_err(|e| e.to_string())?;
     Ok((parsed_res * 100.0).round() as i32)
 }
+    //Working
+    async fn autoplay_toggle(&self) -> Result<bool, String> {
+        let script = r#"
+            return (() => {
+                const mk = MusicKit.getInstance();
+                if (typeof mk.autoplayEnabled !== 'boolean') {
+                    return { success: false, error: 'autoplayEnabled is ' + typeof mk.autoplayEnabled };
+                }
+                mk.autoplayEnabled = !mk.autoplayEnabled;
+                return { success: true, enabled: mk.autoplayEnabled };
+            })();
+        "#;
+
+        let res = self.execute(script, vec![]).await.map_err(|e| e.to_string())?;
+        let v: serde_json::Value = res.json().clone();
+
+        if v.get("success").and_then(|s| s.as_bool()) != Some(true) {
+            return Err(format!("autoplay toggle failed: {}", v));
+        }
+        Ok(v.get("enabled").and_then(|e| e.as_bool()).unwrap_or(false))
+    }
 }
 
