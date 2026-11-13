@@ -1,8 +1,8 @@
 use crate::DaemonResponse;
+use crate::commands::PlayerCommand;
 use thirtyfour::WebDriver;
 use tokio::net::UnixStream;
 use tokio::io::{AsyncReadExt, BufReader};
-use crate::Commands;
 
 
 pub async fn handle_client(stream: &mut UnixStream, driver: &WebDriver) -> Result<Vec<u8>, String> {
@@ -23,7 +23,7 @@ pub async fn handle_client(stream: &mut UnixStream, driver: &WebDriver) -> Resul
     reader.read_exact(&mut payload).await
         .map_err(|e| format!("Failed reading payload: {}", e))?;
 
-    let command: Commands = wincode::deserialize(&payload)
+    let command: PlayerCommand = wincode::deserialize(&payload)
         .map_err(|e| format!("Failed Deserializing payload from bytes: {}", e))?;
     let daemon_res = match command.execute_daemon(driver).await{
         Ok(r) => (DaemonResponse::Success(r.0), r.1),

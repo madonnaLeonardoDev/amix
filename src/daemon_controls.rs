@@ -1,5 +1,5 @@
 use thirtyfour::{WebDriver};
-use crate::{Commands, browser_interface::*};
+use crate::{browser_interface::*, commands::{MediaType, PlayerCommand}};
 
 pub fn format_time(time_ms: u32) -> String {
     let tot_secs = time_ms / 1000;
@@ -16,64 +16,55 @@ pub fn format_time(time_ms: u32) -> String {
     }
 }
 
-impl Commands {
+impl PlayerCommand {
     pub async fn execute_daemon(self, driver:&WebDriver) -> Result<(Vec<u8>, bool /* requires persistent connection */), String> {
         match self {
-        Commands::Search { stype, query, next, insta_play, library } => {
-            let search_type = match stype.to_lowercase().as_str() {
-                "song" | "s" => ItemType::Song,
-                "album" | "a" => ItemType::Album,
-                "playlist" | "p" => ItemType::Playlist,
-                _ => {
-                   return Err("Invalid search type (stype) argument".to_string());
-                }
-            };
-            let joined_query = query.replace("-", " ");
-            let search_res = driver.search(&joined_query, &search_type,library).await?;
+        //WORKING
+        PlayerCommand::Search(search_args) => {
+            let search_res = search_args.resolve_search(driver).await?;
+                    let res = match search_res {
+                        SearchResult::Track(track) => {
+                            let id = if track.id.is_none() {
+                            return Ok(("No track id".as_bytes().to_vec(), false));
+                            } else {
+                            track.id.clone().unwrap()
+                            };
 
-            let result_tuple:(String, String) = match search_res {
-                SearchResult::Track(track) => {
-                    let id = if track.id.is_none() {
-                    return Ok(("No Matches found".as_bytes().to_vec(), false));
-                    } else {
-                    track.id.clone().unwrap()
-                    };
+                            (track.pretty_display(), id)
+                    },
+                    SearchResult::Playlist(playlist) => {
+                        let id = if playlist.id.is_none() {
+                            return Ok(("No Playlist id".as_bytes().to_vec(), false));
+                        } else {
+                            playlist.id.clone().unwrap()
+                        };
 
-                    (track.pretty_display(), id)
-            },
-            SearchResult::Playlist(playlist) => {
-                let id = if playlist.id.is_none() {
-                    return Ok(("No Matches found".as_bytes().to_vec(), false));
-                } else {
-                    playlist.id.clone().unwrap()
+                        (playlist.pretty_display(), id)
+                    },
+                    SearchResult::Album(album) => {
+                        let id = if album.id.is_none() {
+                            return Ok(("No Album id".as_bytes().to_vec(), false));
+                        } else {
+                            album.id.clone().unwrap()
+                        };
+
+                        (album.pretty_display(), id)
+
+                    }
+                    SearchResult::Artist(artist) => {
+                        let id = if artist.id.is_none() {
+                            return Ok(("No Artist id".as_bytes().to_vec(), false));
+                        } else {
+                            artist.id.clone().unwrap()
+                        };
+
+                        (artist.pretty_display(), id)
+                    }
                 };
-
-                (playlist.pretty_display(), id)
-            },
-            SearchResult::Album(album) => {
-                let id = if album.id.is_none() {
-                    return Ok(("No Matches Found".as_bytes().to_vec(), false));
-                } else {
-                    album.id.clone().unwrap()
-                };
-
-                (album.pretty_display(), id)
-
+                Ok((res.0.as_bytes().to_vec(), false))
             }
-            };
-            if next{
-                driver.play_next(&search_type, &result_tuple.1).await?;
-            }
-            if insta_play {
-                driver.play_next(&search_type, &result_tuple.1).await?;
-                driver.next_track().await?
-            }
-            if next && insta_play {
-                return Err("Either Insta-Play (-p) or Play-Next (-n)".to_string());
-            }
-            Ok((result_tuple.0.as_bytes().to_vec(), false))
-        },
-        Commands::Current => {
+        //WORKING
+        PlayerCommand::Current => {
             if let Some(track) = driver.get_current_track().await? {
                 let title:String = if track.title.is_none(){
                     "Unkown Title".to_string()
@@ -106,38 +97,45 @@ impl Commands {
 
             Ok(("No Track playing".to_string().as_bytes().to_vec(), false))
         },
-        Commands::LsPlaylists => {
-            match driver.list_library_playlists().await {
-            Ok(pl) => {
-                let result: String = pl
-                .iter()
-                .map(|pl| pl.pretty_display())
-                .collect();
-                Ok((result.as_bytes().to_vec(), false))
-            },
-            Err(e) => return Err(e)
-            }
-        },
-        Commands::Playid { stype, id, next } => {
-            let item_type = match stype.to_lowercase().as_str() {
-                "song" | "s" => ItemType::Song,
-                "album" | "a" => ItemType::Album,
-                "playlist" | "p" => ItemType::Playlist,
-                _ => {
-                    return Err("Invalid search type (stype) argument".to_string());
-                }
-            };
-
-            let id = driver.play_next(&item_type, &id).await
+        //WORKING
+        PlayerCommand::SetQueue(search_args) => {
+            let is_library = search_args.is_target_library;
+            let search_res = search_args.resolve_search(driver).await?;
+                let (res_type, id) = match search_res {
+                    SearchResult::Album(album) => {
+                        if album.id.is_none() {
+                            return Ok(("No Track found".as_bytes().to_vec(), false))
+                        }
+                        (MediaType::Album, album.id)  
+                    },
+                    SearchResult::Artist(artist) => {
+                        if artist.id.is_none() {
+                            return Ok(("No Track found".as_bytes().to_vec(), false))
+                        }
+                        (MediaType::Artist, artist.id)  
+                    },
+                    SearchResult::Playlist(playlist) => {
+                        if playlist.id.is_none() {
+                            return Ok(("No Track found".as_bytes().to_vec(), false))
+                        }
+                        (MediaType::Playlist, playlist.id)  
+                    },
+                    SearchResult::Track(track) => {
+                        if track.id.is_none() {
+                            return Ok(("No Track found".as_bytes().to_vec(), false))
+                        }
+                        (MediaType::Song, track.id)  
+                    }
+                };
+                let id = driver.set_queue(&res_type, &id.unwrap(), is_library).await
                 .map_err(|e| e.to_string())?;
+                
+                driver.play().await?;
 
-                if !next {
-                    driver.next_track().await?;
-                    return Ok((format!("Playing Now: {}",id).as_bytes().to_vec(), false));
-                }
-            Ok((format!("Playing Next: {}",id).as_bytes().to_vec(), false))
-        },
-        Commands::PlayPause => {
+                return Ok((format!("Playing: {}",id).as_bytes().to_vec(), false))
+            }
+        //WORKING
+        PlayerCommand::PlayStop => {
             let script = r#"
                 const mk = MusicKit.getInstance();
                 return mk ? (mk.isPlaying || mk.playbackState === 2) : false;
@@ -164,21 +162,24 @@ impl Commands {
                 return Ok(("Play".to_string().as_bytes().to_vec(), false))
             }
         },
-        Commands::Next  => {
+        //WORKING
+        PlayerCommand::NextTrack  => {
             if let Err(e) = driver.next_track().await {
                     return Err(e.to_string());
                 }
 
             Ok(("Next Track".to_string().as_bytes().to_vec(), false))
         },
-        Commands::Prev  => {
+        //WORKING
+        PlayerCommand::PrevTrack  => {
             if let Err(e) = driver.previous_track().await {
                 return Err(e.to_string());
             }
 
             Ok(("Previous Track".to_string().as_bytes().to_vec(), false))
         },
-        Commands::Shuffle => {
+        //WORKING
+        PlayerCommand::ShuffleToggle => {
             let mode = driver.shuffle_toggle().await
                     .map_err(|e| e.to_string())?;
 
@@ -187,38 +188,54 @@ impl Commands {
                 }
             Ok(("Shuffling Off".to_string().as_bytes().to_vec(), false))
         },
-        Commands::ClearQueue => {
-            driver.clear_queue().await?;
-
-            Ok(("Queue Cleared".to_string().as_bytes().to_vec(), false))
+        //WORKING
+        PlayerCommand::RmQueue(index) => {
+            match index {
+                None => {
+                    driver.clear_queue().await?;
+                    Ok(("Queue Cleared".to_string().as_bytes().to_vec(), false))
+                },
+                Some(i) => {
+                    driver.remove_queue(i).await?;
+                    Ok((format!("Remove item at index: {}", i).as_bytes().to_vec(), false))
+                }
+            }
         },
-        Commands::LsQueue => {
+        //WORKING
+        PlayerCommand::ListQueueTracks(limit) => {
             let queue = driver.list_queue().await?;
-            let formatted_str:String = queue.iter()
-            .map(|track| format!("{}",track.pretty_display()))
-            .collect();
-            
+            let mut formatted_str: String = String::new();
+            let tracks = match limit {
+                Some(l) => queue.into_iter().take(l as usize).collect::<Vec<Track>>(),
+                None => queue 
+            };
+            for track in tracks {
+                formatted_str.push_str(&track.pretty_display());
+            }
             Ok((formatted_str.as_bytes().to_vec(), false))
         },
-        Commands::Volume { args } => {
-            if let Some(v) = args{
+        //WORKING
+        PlayerCommand::Volume(val) => {
+            if let Some(v) = val{
                 if v > 100 {
                     return Err("Value must be between 0 - 100".to_string());
                 }
             }
 
-            let volume = driver.volume(args).await?;
+            let volume = driver.volume(val).await?;
 
-            if args.is_some() {
+            if val.is_some() {
                 Ok((format!("Volume set to: {}", volume).as_bytes().to_vec(), false))
             } else {
                 Ok((format!("Volume: {}", volume).as_bytes().to_vec(), false))
             }
         },
-        Commands::DisplaModeDaemon => {
+        //WORKING
+        PlayerCommand::DisplaModeDaemon => {
             Ok((vec![0u8; 1], true))
         },
-        Commands::GetNextTrackMeta => {
+        //WORKING
+        PlayerCommand::GetNextTrackMeta => {
                 let track_queue = driver.list_queue().await?;
 
                 let track = track_queue.get(1);
@@ -230,8 +247,163 @@ impl Commands {
 
                 return Ok((bytes, false))
             },
-        _=> {
-            Err("Invalid Command".to_string())
+        //WORKING
+        PlayerCommand::QueueAdd{search: search_args, is_next} => {
+            let search_res = driver.search(&search_args.target, search_args.search_type, search_args.is_target_library, search_args.limit.unwrap_or(1)).await?;
+            match search_res {
+                SearchResult::Album(item) => {
+                    let id = match item.id {
+                        Some(id) => id,
+                        None => return Err("Cannot get results id".to_string())
+                    };
+                    driver.queue(&MediaType::Album,&id, is_next).await?;
+
+                    return Ok((format!("Added to queue: {}", id).as_bytes().to_vec(), false));
+                },
+                SearchResult::Playlist(item) => {
+                    let id = match item.id {
+                        Some(id) => id,
+                        None => return Err("Cannot get results id".to_string())
+                    };
+                    driver.queue(&MediaType::Playlist,&id, is_next).await?;
+
+                    return Ok((format!("Added to queue: {}", id).as_bytes().to_vec(), false));
+                },
+                SearchResult::Track(item) => {
+                    let id = match item.id {
+                        Some(id) => id,
+                        None => return Err("Cannot get results id".to_string())
+                    };
+                    driver.queue(&MediaType::Song,&id, is_next).await?;
+
+                    return Ok((format!("Added to queue: {}", id).as_bytes().to_vec(), false));
+                },
+                SearchResult::Artist(_) => {
+                    return Err("Cannot queue an artist".to_string());
+                }
+            }
+        },
+        //WORKING
+        PlayerCommand::AutoPlayToggle => {
+            let res = driver.autoplay_toggle().await?;
+            if res {
+                Ok(("Autoplay On".as_bytes().to_vec(), false))
+            } else {
+                Ok(("Autoplay Off".as_bytes().to_vec(), false))
+            }
+            
+        }
+        //WORKING
+        PlayerCommand::MkPlaylist { name, desc } => {
+            let id_res = driver.create_pl(&name, &desc).await?;
+            Ok((format!("PLaylist created successfully id: {}", id_res).as_bytes().to_vec(), false))
+        }
+        //WORKING
+        PlayerCommand::MvToPlaylist { track_target, is_track_target_current, playlist_target, is_playlist_target_fav } => {
+            let track_id:String = match (track_target, is_track_target_current) {
+                (Some(t), false) => {
+                    let res = driver.search(&t, vec![MediaType::Song], false, 1).await?;
+                    match res {
+                        SearchResult::Track(t) => {
+                            if let Some(id) = t.id {
+                                id
+                            } else {
+                                return Err("Cant get tracks id".to_string())
+                            }
+                        }
+                        _=> {
+                            return Err("Search results type isnt supported in playlist".to_string())
+                        }
+                    }
+                },
+                (None, true) => {
+                    let current = driver.get_current_track().await?;
+                    if let Some(t) = current {
+                            if let Some(id) = t.id {
+                                id
+                            } else {
+                                return Err("Cant get tracks id".to_string())
+                            }
+                    } else {
+                        return Err("No track playing".to_string())
+                    }
+
+                },
+                (None, false) => return Err("Either current track or query".to_string()),
+                (Some(_), true) => return Err("Either current track or query".to_string())
+            };
+
+            if is_playlist_target_fav {
+                return Ok((driver.add_to_fav(&track_id).await?.as_bytes().to_vec(), false))
+            }
+
+            let playlist_id: String = 
+                if let Some(t) = playlist_target{
+                    let res = driver.search(&t, vec![MediaType::Playlist], true, 1).await?;
+
+                    match res {
+                        SearchResult::Playlist(t) => {
+                            if let Some(id) = t.id {
+                                id
+                            } else {
+                                return Err("Cant get playlist id".to_string())
+                            }
+                        }
+                        _=> {
+                            return Err("Search results type isnt supported in playlist".to_string())
+                        }
+                    }
+
+                } else {
+                    return Err("Either Favorite playlist or playlist query".to_string())
+                };
+                
+                Ok((driver.add_to_pl(&track_id, &playlist_id).await?.as_bytes().to_vec(), false))
+        }
+        
+        //WORKING
+        PlayerCommand::RmPlaylist(query) => {
+            let res = driver.search(&query, vec![MediaType::Playlist], true, 1).await?;
+            let pl_id = match res{
+                SearchResult::Playlist(p) => {
+                    if let Some(id) = p.id {
+                        id
+                    } else {
+                        return Err("Could not get playlist id".to_string())
+                    }
+                },
+                _=> return Err("Search returned a non supported type".to_string())
+            };
+            Ok((driver.delete_pl(&pl_id).await?.as_bytes().to_vec(), false))
+        }
+        
+        PlayerCommand::RmFromPlaylist { track_target_search, playlist_target_search } => {
+            let res_track = driver.search(&track_target_search, vec![MediaType::Song], true, 1).await?;
+            let track_id = match res_track{
+                SearchResult::Track(p) => {
+                    if let Some(id) = p.id {
+                        id
+                    } else {
+                        return Err("Could not get track id".to_string())
+                    }
+                },
+                _=> return Err("Search returned a non supported type".to_string())
+            };
+
+            let res_pl = driver.search(&playlist_target_search, vec![MediaType::Playlist], true, 1).await?;
+            let pl_id = match res_pl{
+                SearchResult::Playlist(p) => {
+                    if let Some(id) = p.id {
+                        id
+                    } else {
+                        return Err("Could not get playlist id".to_string())
+                    }
+                },
+                _=> return Err("Search returned a non supported type".to_string())
+            };
+
+
+        Ok((driver.rm_from_pl(&track_id, &pl_id).await?.as_bytes().to_vec()  ,false))
         }
         }
     }
