@@ -244,48 +244,43 @@ async fn search(&self, term: &str, item_types: Vec<MediaType>, is_library: bool,
     search_result.ok_or_else(|| "No Matches Found".to_string())
 }
     //WORKING
-    async fn queue(&self, item_type: &MediaType, id: &str, is_next: bool) -> Result<String, String> {
-    
-    let method = if is_next {
-        "playNext"
-    } else {
-        "playLater"
+async fn queue(&self, item_type: &MediaType, id: &str, is_next: bool) -> Result<String, String> {
+    let method = if is_next { "playNext" } else { "playLater" };
+
+    let key = match item_type {
+        MediaType::Song => "song",
+        MediaType::Album => "album",
+        MediaType::Playlist => "playlist",
+        MediaType::Artist => return Err("Can't queue an artist".to_string()),
     };
 
-    if item_type == &MediaType::Artist {
-        return Err("Cant Queue an artist".to_string());
-    }
-    
+    let id_js = serde_json::to_string(id).map_err(|e| e.to_string())?;
+
     let script = format!(r#"
     return (async () => {{
-        const mk = MusicKit.getInstance();
-        if (!mk || !mk.isAuthorized ) {{
-        await mk?.authorize();
-    }}
-    try {{ 
-    await mk.{}({{ {}: '{}'}});
-    return true;
-    }}
-    catch (e) {{
-        return false;
-    }}
-    }})()
-    "#,method, item_type.as_str(), id);
+        try {{
+            const mk = MusicKit.getInstance();
+            if (!mk.isAuthorized) {{
+                await mk.authorize();
+            }}
+            await mk.{}({{ {}: {} }});
+            return {{ success: true }};
+        }} catch (e) {{
+            return {{ success: false, error: String(e) }};
+        }}
+    }})();
+    "#, method, key, id_js);
 
-    let res = self.execute(script, vec![]).await
-        .map_err(|e| e.to_string())?;
+    let res = self.execute(script, vec![]).await.map_err(|e| e.to_string())?;
+    let v: serde_json::Value = res.json().clone();
 
-
-    let is_success: bool = serde_json::from_value(res.json().clone())
-        .map_err(|e| e.to_string())?;
-
-    if is_success {
-        return Ok(id.to_string())
+    if v.get("success").and_then(|s| s.as_bool()) == Some(true) {
+        return Ok(id.to_string());
     }
 
-    Err("Could Not play next, maybe wrong id".to_string())
-        
-    }
+    let err = v.get("error").and_then(|e| e.as_str()).unwrap_or("unknown error");
+    Err(format!("Could not queue ({}): {}", method, err))
+}
 
     //WORKING
 async fn set_queue(&self, item_type: &MediaType, id: &str, is_library: bool) -> Result<String, String> {
