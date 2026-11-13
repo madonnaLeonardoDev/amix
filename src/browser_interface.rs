@@ -117,13 +117,15 @@ pub trait MusicDriver {
     async fn next_track(&self) -> Result<(), String>; 
     async fn previous_track(&self) -> Result<(), String>;
     async fn shuffle_toggle(&self) -> Result<i64, String>;
-    async fn list_library_playlists(&self) -> Result<Vec<Playlist>, String>; 
     async fn get_current_track(&self) -> Result<Option<Track>, String>; 
     async fn clear_queue(&self) -> Result<(), String>; 
     async fn remove_queue(&self, index: u32) -> Result<(), String>;
     async fn list_queue(&self) -> Result<Vec<Track>, String>;
     async fn volume(&self, val: Option<u32>) -> Result<i32, String>;
     async fn autoplay_toggle(&self) -> Result<bool, String>;
+    async fn create_pl(&self, name: &str, desc: &str) -> Result<String, String>;
+    async fn add_to_pl(&self, track_id: &str, pl_id: &str) -> Result<String, String>;
+    async fn add_to_fav(&self, track_id: &str) -> Result<String, String>;
 }
 
 impl MusicDriver for WebDriver {
@@ -402,48 +404,7 @@ async fn set_queue(&self, item_type: &MediaType, id: &str, is_library: bool) -> 
     self.execute(script, vec![]).await.map_err(|e| e.to_string())?;
     Ok(num_mode)
 }
-    
-    async fn list_library_playlists(&self) -> Result<Vec<Playlist>, String> {
-    let script = r#"
-        return (async () => {
-            try {
-                const mk = MusicKit.getInstance();
-                if (!mk || !mk.isAuthorized) {
-                    await mk?.authorize();
-                }
 
-                const response = await mk.api.music('v1/me/library/playlists', { limit: 100 });
-                const rawItems = response?.data?.data || [];
-
-                // 2. Return the FLATTENED mapped array, NOT 'rawItems'
-                return rawItems.map(p => ({
-                    id: p.id,
-                    name: p.attributes?.name || null,
-                    desc: p.attributes?.description?.standard || null,
-                }));
-            } catch (err) {
-                console.error("MusicKit error:", err);
-                return [];
-            }
-        })();
-    "#;
-
-    let res = self
-        .execute(script, vec![])
-        .await
-        .map_err(|e| format!("WebDriver script execution failed: {}", e))?;
-
-    let json_val = res.json();
-
-    // 3. Explicit error reporting instead of silent fallback
-    serde_json::from_value::<Vec<Playlist>>(json_val.clone()).map_err(|e| {
-        format!(
-            "Deserialization failed for JSON `{}`: {}",
-            json_val, e
-        )
-    })
-}
-    
     //WORKING
     async fn get_current_track(&self) -> Result<Option<Track>, String> {
     let script = r#"
@@ -556,7 +517,7 @@ return (() => {
             .map_err(|e| e.to_string())?;
     Ok((parsed_res * 100.0).round() as i32)
 }
-    //Working
+    //WORKING
     async fn autoplay_toggle(&self) -> Result<bool, String> {
         let script = r#"
             return (() => {
@@ -577,5 +538,160 @@ return (() => {
         }
         Ok(v.get("enabled").and_then(|e| e.as_bool()).unwrap_or(false))
     }
+    //WORKING
+    async fn create_pl(&self, name: &str, desc: &str) -> Result<String, String> {
+let name_js = serde_json::to_string(name).map_err(|e| e.to_string())?;
+let desc_js = serde_json::to_string(desc).map_err(|e| e.to_string())?;
+
+let script = format!(r#"
+    return (async () => {{
+        try {{
+            const mk = MusicKit.getInstance();
+            const r = await fetch('https://amp-api.music.apple.com/v1/me/library/playlists', {{
+                method: 'POST',
+                headers: {{
+                    Authorization: `Bearer ${{mk.developerToken}}`,
+                    'Music-User-Token': mk.musicUserToken,
+                    'Content-Type': 'application/json',
+                }},
+                body: JSON.stringify({{
+                    attributes: {{
+                        name: {},
+                        description: {}
+                    }}
+                }}),
+            }});
+            const json = await r.json();
+            const id = json?.data?.[0]?.id;
+
+            if (r.status !== 201 || !id) {{
+                return {{ success: false, error: 'create failed', status: r.status, body: json }};
+            }}
+            return {{ success: true, id }};
+        }} catch (e) {{
+            return {{ success: false, error: String(e) }};
+        }}
+    }})();
+"#, name_js, desc_js);
+
+    let res = self
+        .execute(script, vec![])
+        .await
+        .map_err(|e| e.to_string())?;
+    let v: serde_json::Value = res.json().clone();
+
+    if v.get("success").and_then(|s| s.as_bool()) == Some(true) {
+        return Ok(v["id"].as_str().unwrap_or_default().to_string());
+    }
+    Err(format!("create_playlist failed: {}", v))
+}
+    //WORKING
+    async fn add_to_pl(&self, track_id: &str, pl_id: &str) -> Result<String, String> {
+    let script = format!(
+        r#"
+        return (async () => {{
+            const mk = MusicKit.getInstance();
+            const devToken = mk.developerToken;
+            const userToken = mk.musicUserToken;
+            
+            const trackId = "{}";
+            const playlistId = "{}";
+
+            if (!devToken || !userToken) {{
+                throw new Error("MusicKit tokens not found. Ensure you are authorized.");
+            }}
+
+            // 1. Add the song to the user's library using native fetch
+            const libRes = await fetch(`https://amp-api.music.apple.com/v1/me/library?ids[songs]=${{trackId}}`, {{
+                method: 'POST',
+                headers: {{
+                    'Authorization': `Bearer ${{devToken}}`,
+                    'Music-User-Token': userToken,
+                    'Content-Type': 'application/json'
+                }}
+            }});
+
+            await new Promise(resolve => setTimeout(resolve, 1500));
+
+            // 2. Push the track into the target playlist with a guaranteed JSON body
+            const plRes = await fetch(`https://amp-api.music.apple.com/v1/me/library/playlists/${{playlistId}}/tracks`, {{
+                method: 'POST',
+                headers: {{
+                    'Authorization': `Bearer ${{devToken}}`,
+                    'Music-User-Token': userToken,
+                    'Content-Type': 'application/json'
+                }},
+                body: JSON.stringify({{
+                    data: [
+                        {{
+                            id: trackId,
+                            type: "songs"
+                        }}
+                    ]
+                }})
+            }});
+
+            if (!plRes.ok) {{
+                const errorDetails = await plRes.text();
+                throw new Error(`Playlist insertion failed (${{plRes.status}}): ${{errorDetails}}`);
+            }}
+
+            return `Successfully added track ${{trackId}} to playlist ${{playlistId}}`;
+        }})();
+        "#,
+        track_id, pl_id
+    );
+
+    let res = self.execute(script, vec![]).await
+        .map_err(|e| e.to_string())?;
+
+    let message: String = serde_json::from_value(res.json().clone()).map_err(|e| e.to_string())?;
+
+    Ok(message)
+}
+    //WORKING
+    async fn add_to_fav(&self, track_id: &str) -> Result<String, String> {
+    let script = format!(
+        r#"
+        return (async () => {{
+            const mk = MusicKit.getInstance();
+            const devToken = mk.developerToken;
+            const userToken = mk.musicUserToken;
+            const trackId = "{}";
+
+            if (!devToken || !userToken) {{
+                throw new Error("MusicKit tokens not found. Ensure you are authorized.");
+            }}
+
+            // POST to the Apple Music favorites endpoint
+            const res = await fetch(`https://amp-api.music.apple.com/v1/me/favorites?ids[songs]=${{trackId}}`, {{
+                method: 'POST',
+                headers: {{
+                    'Authorization': `Bearer ${{devToken}}`,
+                    'Music-User-Token': userToken,
+                    'Content-Type': 'application/json'
+                }}
+            }});
+
+            if (!res.ok && res.status !== 202) {{
+                const errorDetails = await res.text();
+                throw new Error(`Failed to favorite track (${{res.status}}): ${{errorDetails}}`);
+            }}
+
+            return `Successfully added track ${{trackId}} to favorites`;
+        }})();
+        "#,
+        track_id
+    );
+
+    let res = self.execute(script, vec![]).await
+        .map_err(|e| e.to_string())?;
+
+    let message: String = serde_json::from_value(res.json().clone()).map_err(|e| e.to_string())?;
+
+    Ok(message)
+}
+
+
 }
 

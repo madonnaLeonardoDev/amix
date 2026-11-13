@@ -97,18 +97,6 @@ impl PlayerCommand {
 
             Ok(("No Track playing".to_string().as_bytes().to_vec(), false))
         },
-        PlayerCommand::ListPlaylists => {
-            match driver.list_library_playlists().await {
-            Ok(pl) => {
-                let result: String = pl
-                .iter()
-                .map(|pl| pl.pretty_display())
-                .collect();
-                Ok((result.as_bytes().to_vec(), false))
-            },
-            Err(e) => return Err(e)
-            }
-        },
         //WORKING
         PlayerCommand::SetQueue(search_args) => {
             let is_library = search_args.is_target_library;
@@ -304,6 +292,73 @@ impl PlayerCommand {
                 Ok(("Autoplay Off".as_bytes().to_vec(), false))
             }
             
+        }
+        //WORKING
+        PlayerCommand::MkPlaylist { name, desc } => {
+            let id_res = driver.create_pl(&name, &desc).await?;
+            Ok((format!("PLaylist created successfully id: {}", id_res).as_bytes().to_vec(), false))
+        }
+        //WORKING
+        PlayerCommand::MvToPlaylist { track_target, is_track_target_current, playlist_target, is_playlist_target_fav } => {
+            let track_id:String = match (track_target, is_track_target_current) {
+                (Some(t), false) => {
+                    let res = driver.search(&t, vec![MediaType::Song], false, 1).await?;
+                    match res {
+                        SearchResult::Track(t) => {
+                            if let Some(id) = t.id {
+                                id
+                            } else {
+                                return Err("Cant get tracks id".to_string())
+                            }
+                        }
+                        _=> {
+                            return Err("Search results type isnt supported in playlist".to_string())
+                        }
+                    }
+                },
+                (None, true) => {
+                    let current = driver.get_current_track().await?;
+                    if let Some(t) = current {
+                            if let Some(id) = t.id {
+                                id
+                            } else {
+                                return Err("Cant get tracks id".to_string())
+                            }
+                    } else {
+                        return Err("No track playing".to_string())
+                    }
+
+                },
+                (None, false) => return Err("Either current track or query".to_string()),
+                (Some(_), true) => return Err("Either current track or query".to_string())
+            };
+
+            if is_playlist_target_fav {
+                return Ok((driver.add_to_fav(&track_id).await?.as_bytes().to_vec(), false))
+            }
+
+            let playlist_id: String = 
+                if let Some(t) = playlist_target{
+                    let res = driver.search(&t, vec![MediaType::Playlist], true, 1).await?;
+
+                    match res {
+                        SearchResult::Playlist(t) => {
+                            if let Some(id) = t.id {
+                                id
+                            } else {
+                                return Err("Cant get playlist id".to_string())
+                            }
+                        }
+                        _=> {
+                            return Err("Search results type isnt supported in playlist".to_string())
+                        }
+                    }
+
+                } else {
+                    return Err("Either Favorite playlist or playlist query".to_string())
+                };
+                
+                Ok((driver.add_to_pl(&track_id, &playlist_id).await?.as_bytes().to_vec(), false))
         }
         _=> {
             Err("Invalid Command".to_string())

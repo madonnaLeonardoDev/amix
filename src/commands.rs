@@ -63,16 +63,6 @@ pub struct RmPlCommand{
 }
 
 #[derive(Args, Debug, Clone, SchemaRead, SchemaWrite)]
-pub struct MkPlCommand{
-    #[arg(
-        value_name = "playlist_name",
-        help = "playlist name"
-    )]
-    pub playlist_name: String,
-}
-
-
-#[derive(Args, Debug, Clone, SchemaRead, SchemaWrite)]
 #[command(
     group = ArgGroup::new("rm_target")
         .required(true)
@@ -117,14 +107,6 @@ pub struct MvCommand {
         help = "Track name or query string"
     )]
     pub track_query: Option<String>,
-
-    #[arg(
-        long = "current",
-        group = "slot1_target",
-        help = "Target the currently playing track",
-        action = clap::ArgAction::SetTrue
-    )]
-    pub current: bool,
 
     // ==================== SECOND POSITION ====================
     #[arg(
@@ -200,7 +182,10 @@ pub enum Commands {
     Rmpl(RmPlCommand),
 
     #[command()]
-    Mkpl(MkPlCommand),
+    Mkpl{
+        name: String,
+        desc: Option<String>
+    },
 
     #[command()]
     Mv(MvCommand),
@@ -255,33 +240,50 @@ impl SearchArgs {
 
 #[derive(SchemaRead, SchemaWrite)]
 pub enum PlayerCommand{
+    //WORKING
     PlayStop,
+    //WORKING
     NextTrack,
+    //WORKING
     PrevTrack,
+    //WORKING
     ShuffleToggle,
+    //WORKING
     AutoPlayToggle,
+    //WORKING
     Volume(Option<u32>),
+    //WORKING
     SetQueue(SearchArgs),
+    //WORKING
     QueueAdd{
         search: SearchArgs,
         is_next: bool
     },
+    //WORKING
     Search(SearchArgs),
-    ListPlaylists,
+    //WORKING
     ListQueueTracks(Option<u32>),
+    //WORKING
     RmQueue(Option<u32>),
+
     RmFromPlaylist{
         track_target_search: SearchArgs,
         playlist_target_search: SearchArgs
     },
     RmPlaylist(SearchArgs),
-    MkPlaylist(String),
+    //WORKING
+    MkPlaylist{
+        name: String,
+        desc: String
+    },
+
     MvToPlaylist{
-        track_target: Option<SearchArgs>,
+        track_target: Option<String>,
         is_track_target_current: bool,
-        playlist_target: Option<SearchArgs>,
+        playlist_target: Option<String>,
         is_playlist_target_fav: bool
     },
+    //WORKING
     Current,
 
     //INTERNAL COMMANDS
@@ -381,24 +383,23 @@ impl Commands {
                             { target: target.to_string(), search_type: vec![MediaType::Playlist], is_target_library: true , limit: Some(1)}));
             }
 
-            Commands::Mkpl(command) => {
-                return Ok(PlayerCommand::MkPlaylist(command.playlist_name.clone()))
+            Commands::Mkpl{name, desc} => {
+                return Ok(PlayerCommand::MkPlaylist { name: name.to_string(), desc: desc.to_owned().unwrap_or("".to_string()) })
             }
 
             Commands::Mv(command) => {
                 let (track_target, is_track_target_current): (Option<String>, bool) = 
-                    match (command.track_query.as_ref(), command.current){
-                        (Some(q), false) => {
-                            (Some(q.to_string()), false)
+                    match command.track_query.as_ref(){
+                        Some(q) => {
+                            if q == "@" {
+                                (None, true)
+                            } else {
+                                (Some(q.to_string()), false)
+                            }
+                            
                         },
-                        (None, true) => {
-                            (None, true)
-                        },
-                        (Some(_), true) => {
-                            return Err("Either current track or query".to_string());
-                        },
-                        (None, false) => {
-                            return Err("Either current track or query".to_string());
+                        None => {
+                            return Err("Either current track [@] or query".to_string());
                         }
                     };
 
@@ -417,18 +418,7 @@ impl Commands {
                                 return Err("Either fav playlist or query".to_string());
                             }
                         };
-
-                let track_sc =  if let Some(target) = track_target {
-                    Some(SearchArgs { target, search_type: vec![MediaType::Song], is_target_library: false , limit: Some(1)})
-                } else {
-                    None
-                };
-                let playlist_sc =  if let Some(target) = playlist_target {
-                    Some(SearchArgs { target, search_type: vec![MediaType::Playlist], is_target_library: true , limit: Some(1)})
-                } else {
-                    None
-                };
-                return  Ok(PlayerCommand::MvToPlaylist { track_target: track_sc , is_track_target_current, playlist_target: playlist_sc, is_playlist_target_fav })
+                return  Ok(PlayerCommand::MvToPlaylist { track_target: track_target , is_track_target_current, playlist_target: playlist_target, is_playlist_target_fav })
             }
         
             Commands::Volume { value } => {
