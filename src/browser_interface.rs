@@ -126,6 +126,8 @@ pub trait MusicDriver {
     async fn create_pl(&self, name: &str, desc: &str) -> Result<String, String>;
     async fn add_to_pl(&self, track_id: &str, pl_id: &str) -> Result<String, String>;
     async fn add_to_fav(&self, track_id: &str) -> Result<String, String>;
+    async fn delete_pl(&self , pl_id: &str) -> Result<String, String>;
+    async fn rm_from_pl(&self, track_id: &str, pl_id: &str) -> Result<String, String>;
 }
 
 impl MusicDriver for WebDriver {
@@ -691,7 +693,131 @@ let script = format!(r#"
 
     Ok(message)
 }
+    //WORKING
+    async fn delete_pl(&self, playlist_id: &str) -> Result<String, String> {
+    let script = format!(
+        r#"
+        return (async () => {{
+            const mk = MusicKit.getInstance();
+            const devToken = mk.developerToken;
+            const userToken = mk.musicUserToken;
+            const playlistId = "{}";
 
+            if (!devToken || !userToken) {{
+                throw new Error("MusicKit tokens not found. Ensure you are authorized.");
+            }}
+
+            const res = await fetch(`https://amp-api.music.apple.com/v1/me/library/playlists/${{playlistId}}`, {{
+                method: 'DELETE',
+                headers: {{
+                    'Authorization': `Bearer ${{devToken}}`,
+                    'Music-User-Token': userToken
+                }}
+            }});
+
+            if (!res.ok) {{
+                const errorDetails = await res.text();
+                throw new Error(`Failed to delete playlist (${{res.status}}): ${{errorDetails}}`);
+            }}
+
+            return `Successfully deleted playlist ${{playlistId}}`;
+        }})();
+        "#,
+        playlist_id
+    );
+
+    let res = self.execute(script, vec![]).await
+        .map_err(|e| e.to_string())?;
+
+    let message = serde_json::from_value(res.json().clone())
+        .map_err(|e| e.to_string())?;
+
+    Ok(message)
+}
+
+    async fn rm_from_pl(&self, track_id: &str, pl_id: &str) -> Result<String, String> {
+let script = format!(
+r#"
+        return (async () => {{
+            const mk = MusicKit.getInstance();
+            const devToken = mk.developerToken;
+            const userToken = mk.musicUserToken;
+            const trackId = "{}";
+            const playlistId = "{}";
+
+            if (!devToken || !userToken) {{
+                throw new Error("MusicKit tokens not found. Ensure you are authorized.");
+}}
+
+            // Library IDs (i.xxxx) are library-songs; numeric IDs are catalog songs
+            const trackType = trackId.startsWith("i.") ? "library-songs" : "songs";
+            const base = `https://amp-api.music.apple.com/v1/me/library/playlists/${{playlistId}}/tracks`;
+
+            const authHeaders = {{
+                'Authorization': `Bearer ${{devToken}}`,
+                'Music-User-Token': userToken
+            }};
+
+            // Check that the track is actually in the playlist before trying to remove it
+            let present = false;
+            let nextUrl = `${{base}}?limit=100`;
+            while (nextUrl && !present) {{
+                const listRes = await fetch(nextUrl, {{ method: 'GET', headers: authHeaders }});
+                if (!listRes.ok) {{
+                    throw new Error(`Could not read playlist ${{playlistId}} to check for the track (${{listRes.status}}): ${{await listRes.text()}}`);
+}}
+                const page = await listRes.json();
+                present = (page.data || []).some(item =>
+                    item.id === trackId ||
+                    item.attributes?.playParams?.id === trackId ||
+                    item.attributes?.playParams?.catalogId === trackId
+                );
+                nextUrl = page.next ? `https://amp-api.music.apple.com${{page.next}}` : null;
+}}
+
+            if (!present) {{
+                return `Track ${{trackId}} was not removed because it is not present in playlist ${{playlistId}}`;
+}}
+
+            const attempts = [
+{{ url: `${{base}}?mode=all`, body: true }},
+{{ url: `${{base}}?ids[${{trackType}}]=${{encodeURIComponent(trackId)}}&mode=all`, body: false }},
+{{ url: `${{base}}?ids[${{trackType}}]=${{encodeURIComponent(trackId)}}`, body: false }},
+{{ url: base, body: true }}
+            ];
+
+            const errors = [];
+            for (const attempt of attempts) {{
+                const res = await fetch(attempt.url, {{
+                    method: 'DELETE',
+                    headers: {{
+                        ...authHeaders,
+                        'Content-Type': 'application/json'
+}},
+                    body: attempt.body
+                        ? JSON.stringify({{ data: [{{ id: trackId, type: trackType }}] }})
+                        : undefined
+}});
+
+                if (res.ok) {{
+                    return `Successfully removed track ${{trackId}} from playlist ${{playlistId}}`;
+}}
+                errors.push(`${{res.status}} ${{attempt.url}}: ${{await res.text()}}`);
+}}
+
+            throw new Error(`Failed to remove track from playlist. Attempts: ${{errors.join(' | ')}}`);
+}})();
+        "#,
+track_id, pl_id
+);
+
+    let res = self.execute(script, vec![]).await
+        .map_err(|e| e.to_string())?;
+
+    let message = serde_json::from_value(res.json().clone())
+        .map_err(|e| e.to_string())?;
+    Ok(message)
+}
 
 }
 

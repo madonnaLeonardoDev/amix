@@ -43,21 +43,28 @@ impl MediaType {
 
 #[derive(Args, Debug, Clone, SchemaRead, SchemaWrite)]
 pub struct FindSearchArgs {
+    /// Text to search for
     pub query: String,
+
+    /// Number of results to show
     #[arg(short, long)]
     pub result: Option<u32>,
+
+    /// Search your library instead of the Apple Music catalog
     #[arg(short, long)]
     pub library: bool,
+
+    /// Only look for one kind of item (song, album, artist or playlist)
     #[arg(short = 't', long = "type")]
     pub search_type: Option<MediaType>,
 }
 
 #[derive(Args, Debug, Clone, SchemaRead, SchemaWrite)]
-pub struct RmPlCommand{
+pub struct RmPlCommand {
     #[arg(
         value_name = "playlist_query",
         group = "playlist_target",
-        help = "playlist name or query"
+        help = "Name of the playlist to remove (or a query that matches it)"
     )]
     pub playlist_query: String,
 }
@@ -69,38 +76,34 @@ pub struct RmPlCommand{
         .multiple(false),
 )]
 pub struct RmCommand {
-    /// Queue index to remove or '*' for all
     #[arg(
         value_name = "INDEX",
         group = "rm_target",
-        help = "Queue index (number) or '*' to clear"
+        help = "Queue position to remove, or '*' to clear the whole queue"
     )]
     pub index: Option<String>,
 
-    /// Remove a track from a playlist (-p <TRACK> <PLAYLIST>)
     #[arg(
         short = 'p',
         num_args = 2,
         value_names = &["TRACK", "PLAYLIST"],
         group = "rm_target",
-        help = "Track and playlist names"
+        help = "Remove a track from a playlist, given the track and playlist names"
     )]
     pub p_args: Option<Vec<String>>,
 }
 
+/// Add a track to a playlist (or move it there)
 #[derive(Args, Debug, Clone, SchemaRead, SchemaWrite)]
 #[command(
-    // Slot 1: Must be either positional query, --track-id, or --current
     group = ArgGroup::new("slot1_target")
         .required(true)
         .multiple(false),
-    // Slot 2: Must be either positional query, --playlist-id, or --fav
     group = ArgGroup::new("slot2_target")
         .required(true)
         .multiple(false),
 )]
 pub struct MvCommand {
-    // ==================== FIRST POSITION ====================
     #[arg(
         value_name = "TRACK_QUERY",
         group = "slot1_target",
@@ -108,114 +111,137 @@ pub struct MvCommand {
     )]
     pub track_query: Option<String>,
 
-    // ==================== SECOND POSITION ====================
     #[arg(
         value_name = "PLAYLIST_QUERY",
         group = "slot2_target",
-        help = "Playlist name or query string"
+        help = "Name of the destination playlist (or a query that matches it)"
     )]
     pub playlist_query: Option<String>,
 
     #[arg(
         long = "fav",
         group = "slot2_target",
-        help = "Target favorites playlist",
+        help = "Use your favorites playlist as the destination",
         action = clap::ArgAction::SetTrue
     )]
     pub fav: bool,
 }
 
-
-
-
-
-
 #[derive(Subcommand, SchemaRead, SchemaWrite, Debug)]
 pub enum Commands {
-
-    ///Start the background services that handle the music player
+    /// Start the background services that handle the music player
     #[command(visible_alias = "sd")]
-    Startd{
+    Startd {
+        /// Open the Apple Music web player in a visible (headed) browser window
         #[arg(short = 'H', long)]
-        head:bool
+        head: bool,
     },
 
-    ///Kill all the services that handle the music player
+    /// Kill all the services that handle the music player
     #[command(visible_alias = "kd")]
     Killd,
 
+    /// Play a song, album, artist or playlist, or toggle play/pause if no target is given
     #[command()]
-    Play{
+    Play {
+        /// Search query or ID of what to play
         #[arg(index = 1, value_name = "Query/id")]
         target: Option<String>,
 
+        /// Kind of item to play (song, album, artist or playlist)
         #[arg(short = 't', long = "type")]
         play_type: Option<MediaType>,
 
+        /// Look in your library instead of the Apple Music catalog
         #[arg(short, long)]
         library: bool,
     },
 
+    /// Add an item to the queue
     #[command()]
-    Queue{
+    Queue {
+        /// Search query or ID of the item to queue
         target: Option<String>,
 
+        /// Kind of item to queue (song, album, artist or playlist)
         #[arg(short = 't', long = "type")]
         play_type: Option<MediaType>,
 
+        /// Look in your library instead of the Apple Music catalog
         #[arg(short, long)]
         library: bool,
 
+        /// Play it next instead of adding it to the end of the queue
         #[arg(short, long)]
         next: bool,
     },
+
+    /// List the tracks in the playing queue
     #[command()]
-    Ls{
-        result: Option<u32>
+    Ls {
+        /// Number of tracks to show
+        result: Option<u32>,
     },
+
+    /// Search for music
     #[command()]
     Find(FindSearchArgs),
 
+    /// Remove a track from the queue or from a playlist
     #[command()]
     Rm(RmCommand),
+
+    /// Remove a playlist from your library
     #[command()]
     Rmpl(RmPlCommand),
 
+    /// Create a new, empty playlist
     #[command()]
-    Mkpl{
+    Mkpl {
+        /// Name of the new playlist
         name: String,
-        desc: Option<String>
+        /// Optional description for the playlist
+        desc: Option<String>,
     },
 
+    /// Add a track to a playlist, or move it there
     #[command()]
     Mv(MvCommand),
 
+    /// Shuffle the queue
     #[command()]
     Shuffle,
 
+    /// Toggle autoplay
     #[command(visible_alias = "auto")]
     Autoplay,
 
+    /// Show the track that is currently playing
     #[command()]
     Current,
 
+    /// Skip to the next track
     #[command(visible_alias = "nx")]
     Next,
 
+    /// Go back to the previous track
     #[command(visible_alias = "pv")]
     Previous,
 
+    /// Show the current volume, or set it if a value is given
     #[command()]
-    Volume{
+    Volume {
+        /// New volume level from 0 to 100; omit to print the current volume
         value: Option<u32>,
     },
 
+    /// Show the artwork and a player dock in the terminal (needs a terminal that can render images)
     #[command()]
-    Display{
+    Display {
+        /// Also show the lyrics of the current track
         #[arg(short, long)]
-        lyrics: bool
-    }
-
+        lyrics: bool,
+    },
 }
 
 #[derive(SchemaRead, SchemaWrite)]
@@ -267,16 +293,17 @@ pub enum PlayerCommand{
     RmQueue(Option<u32>),
 
     RmFromPlaylist{
-        track_target_search: SearchArgs,
-        playlist_target_search: SearchArgs
+        track_target_search: String,
+        playlist_target_search: String
     },
-    RmPlaylist(SearchArgs),
+    //WORKING
+    RmPlaylist(String),
     //WORKING
     MkPlaylist{
         name: String,
         desc: String
     },
-
+    //WORKING
     MvToPlaylist{
         track_target: Option<String>,
         is_track_target_current: bool,
@@ -339,10 +366,10 @@ impl Commands {
                     let search_type = if let Some(t) = search_args.search_type {
                         vec![t]
                     } else {
-                        let mut t = Vec::new();
-                        t.push(MediaType::Album);
+                    let mut t = Vec::new();
                         t.push(MediaType::Song);
                         t.push(MediaType::Artist);
+                        t.push(MediaType::Album);
                         t.push(MediaType::Playlist);
                         t
                     };
@@ -368,8 +395,9 @@ impl Commands {
                     },
                     (None, Some(args)) => {
                         return Ok(PlayerCommand::RmFromPlaylist { 
-                            track_target_search: SearchArgs { target: args[0].to_owned(), search_type: vec![MediaType::Song], is_target_library: true, limit: Some(1) },
-                             playlist_target_search: SearchArgs { target: args[1].to_owned(), search_type: vec![MediaType::Playlist], is_target_library: true, limit: Some(1) } })
+                            track_target_search: args[0].to_owned(),
+                             playlist_target_search: args[1].to_owned()
+                        })
                     },
                     (None, None) => return Err("Either rm -p [INDEX / *] or rm -p [Query / Id] [Query / Id]".to_string()),
                     (Some(_), Some(_)) => return Err("Either rm -p [INDEX / *] or rm -p [Query / Id] [Query / Id]".to_string())
@@ -378,9 +406,8 @@ impl Commands {
             }
 
             Commands::Rmpl(command) => {
-                        let target = &command.playlist_query;
-                        return Ok(PlayerCommand::RmPlaylist(SearchArgs 
-                            { target: target.to_string(), search_type: vec![MediaType::Playlist], is_target_library: true , limit: Some(1)}));
+                        let target = command.playlist_query.to_owned();
+                        return Ok(PlayerCommand::RmPlaylist(target));
             }
 
             Commands::Mkpl{name, desc} => {

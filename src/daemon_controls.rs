@@ -360,8 +360,50 @@ impl PlayerCommand {
                 
                 Ok((driver.add_to_pl(&track_id, &playlist_id).await?.as_bytes().to_vec(), false))
         }
-        _=> {
-            Err("Invalid Command".to_string())
+        
+        //WORKING
+        PlayerCommand::RmPlaylist(query) => {
+            let res = driver.search(&query, vec![MediaType::Playlist], true, 1).await?;
+            let pl_id = match res{
+                SearchResult::Playlist(p) => {
+                    if let Some(id) = p.id {
+                        id
+                    } else {
+                        return Err("Could not get playlist id".to_string())
+                    }
+                },
+                _=> return Err("Search returned a non supported type".to_string())
+            };
+            Ok((driver.delete_pl(&pl_id).await?.as_bytes().to_vec(), false))
+        }
+        
+        PlayerCommand::RmFromPlaylist { track_target_search, playlist_target_search } => {
+            let res_track = driver.search(&track_target_search, vec![MediaType::Song], true, 1).await?;
+            let track_id = match res_track{
+                SearchResult::Track(p) => {
+                    if let Some(id) = p.id {
+                        id
+                    } else {
+                        return Err("Could not get track id".to_string())
+                    }
+                },
+                _=> return Err("Search returned a non supported type".to_string())
+            };
+
+            let res_pl = driver.search(&playlist_target_search, vec![MediaType::Playlist], true, 1).await?;
+            let pl_id = match res_pl{
+                SearchResult::Playlist(p) => {
+                    if let Some(id) = p.id {
+                        id
+                    } else {
+                        return Err("Could not get playlist id".to_string())
+                    }
+                },
+                _=> return Err("Search returned a non supported type".to_string())
+            };
+
+
+        Ok((driver.rm_from_pl(&track_id, &pl_id).await?.as_bytes().to_vec()  ,false))
         }
         }
     }
